@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     chroma_collection_name: str = "katherine_memories"
     
     # RAG settings
-    retrieval_top_k: int = 5
+    retrieval_top_k: int = 10
     min_similarity_threshold: float = 0.3
     
     # Hybrid search settings

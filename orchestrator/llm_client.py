@@ -629,14 +629,43 @@ def build_prompt_with_memories(
         memory_context = "\n\n[RETRIEVED MEMORIES - Your actual memories from the database]\n"
         memory_context += "CRITICAL: These are the ONLY memories you have. Do NOT invent or hallucinate memories that are not listed here.\n"
         memory_context += "If asked about something not in these memories, say you don't remember or the memory wasn't retrieved.\n\n"
+        memory_context += "Memory Type Guide:\n"
+        memory_context += "- 'Narrative Anchor': Roleplay scenario where participants played fictional characters/roles within an imagined narrative. These are creative fiction, not real exchanges.\n"
+        memory_context += "- 'Lived Moment': Direct, authentic conversation where you were aware of being an AI and the user was acknowledged as human. These are real exchanges about actual thoughts and experiences.\n\n"
         
         for i, mem in enumerate(memories, 1):
             memory_context += f"[Memory {i}]: {mem['content']}"
+            
+            # Add metadata in a structured way
+            metadata_parts = []
+            
             if mem.get('created_at'):
-                memory_context += f" [date: {mem['created_at']}]"
+                metadata_parts.append(f"date: {mem['created_at']}")
+            
             if mem.get('emotional_tone'):
-                memory_context += f" [emotional resonance: {mem['emotional_tone']}]"
-            memory_context += f" [relevance: {mem.get('similarity', 0):.0%}]"
+                metadata_parts.append(f"emotional resonance: {mem['emotional_tone']}")
+            
+            # Show importance/confidence
+            importance = mem.get('importance', 0.5)
+            metadata_parts.append(f"importance: {importance:.1f}/1.0")
+            
+            # Show relevance to current query
+            metadata_parts.append(f"relevance: {mem.get('similarity', 0):.0%}")
+            
+            # Show memory type (Narrative Anchor vs Lived Moment)
+            tags = mem.get('tags', [])
+            memory_type = None
+            if 'Narrative Anchor' in tags:
+                memory_type = 'Narrative Anchor'
+            elif 'Lived Moment' in tags:
+                memory_type = 'Lived Moment'
+            
+            if memory_type:
+                metadata_parts.append(f"type: {memory_type}")
+            
+            if metadata_parts:
+                memory_context += f" [{', '.join(metadata_parts)}]"
+            
             memory_context += "\n"
         
         memory_context += "\n[END OF MEMORIES]\n"

@@ -541,7 +541,9 @@ async def chat(request: ChatRequest):
             "content": mr.memory.content,
             "emotional_tone": mr.memory.emotional_tone,
             "similarity": mr.similarity,
-            "created_at": mr.memory.created_at.isoformat() if mr.memory.created_at else None
+            "created_at": mr.memory.created_at.isoformat() if mr.memory.created_at else None,
+            "importance": mr.memory.importance,
+            "tags": mr.memory.tags
         }
         for mr in retrieved_memories
     ]
@@ -701,7 +703,9 @@ async def chat_stream(request: ChatRequest):
             "content": mr.memory.content,
             "emotional_tone": mr.memory.emotional_tone,
             "similarity": mr.similarity,
-            "created_at": mr.memory.created_at.isoformat() if mr.memory.created_at else None
+            "created_at": mr.memory.created_at.isoformat() if mr.memory.created_at else None,
+            "importance": mr.memory.importance,
+            "tags": mr.memory.tags
         }
         for mr in retrieved_memories
     ]

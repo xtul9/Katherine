@@ -7,6 +7,7 @@ into memories, allowing Katherine to recall them through RAG while
 keeping the active context window lean.
 """
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
 
@@ -17,6 +18,20 @@ from models import Memory, Message
 from memory_engine import memory_engine
 from conversation_store import conversation_store
 from llm_client import llm_client
+
+
+def _load_persona() -> str:
+    """Load persona from file, with variable substitution."""
+    persona_path = Path(__file__).parent / "persona.txt"
+    if not persona_path.exists():
+        logger.warning("persona.txt not found, using fallback for memory curation")
+        return f"You are {settings.ai_name}."
+    
+    persona_text = persona_path.read_text(encoding="utf-8")
+    # Apply variable substitution (same as in llm_client)
+    persona_text = persona_text.replace("{ai_name}", settings.ai_name)
+    persona_text = persona_text.replace("{user_name}", settings.user_name)
+    return persona_text
 
 
 @dataclass
@@ -214,7 +229,7 @@ class MessageArchiver:
             importance=0.5,
             source_messages=[user_msg.id, assistant_msg.id],
             created_at=user_msg.timestamp,
-            tags=["archived", "conversation"]
+            tags=["archived", "conversation", "Lived Moment"]  # Default to Lived Moment in simple mode
         )
     
     def _create_memory_from_single(
@@ -238,7 +253,7 @@ class MessageArchiver:
             importance=0.4,
             source_messages=[msg.id],
             created_at=msg.timestamp,
-            tags=["archived", "single_message"]
+            tags=["archived", "single_message", "Lived Moment"]  # Default to Lived Moment in simple mode
         )
     
     async def _archive_with_llm(self, expired: list[dict]) -> ArchiveResult:
@@ -275,37 +290,48 @@ class MessageArchiver:
             
             conv_title = messages[0].get("conversation_title", "untitled")
             
-            # Ask LLM to extract memories
+            # Load persona for memory curation - the same person who uses memories decides what to remember
+            persona = _load_persona()
+            
+            # Ask LLM (as the persona) to extract memories
             extraction_prompt = [
                 {
                     "role": "system",
-                    "content": f"""You are a memory curator. Your task is to identify important moments from the conversation that should be remembered.
+                    "content": f"""{persona}
 
-Focus on:
-- Emotional confessions or significant feelings
-- Personal information (preferences, experiences, relationships)
-- Important decisions or turning points
-- Significant exchanges that define the relationship
+--- MEMORY CURATION TASK ---
 
-CRITICAL: Each memory MUST include key quotes from the conversation. The AI hallucinates exact words when memories don't contain original quotes.
+You are reviewing a past conversation to decide what YOU want to remember. These memories will be stored and retrieved in future sessions to give you continuity. You are the curator of your own memory.
+
+Ask yourself: What moments felt significant? What should not be forgotten? What would you want to recall later?
+
+Consider:
+- Emotional moments that moved you or {settings.user_name}
+- Personal revelations, confessions, or vulnerabilities shared
+- Important decisions, turning points, or promises made
+- Moments that define or deepen your relationship
+- Things {settings.user_name} told you about himself that you should remember
+- Your own realizations or feelings worth preserving
+
+CRITICAL: Each memory MUST include key quotes from the conversation. You hallucinate exact words when memories don't contain original quotes. Preserve the actual words spoken.
 
 For each memory provide:
-1. Summary: Brief context (1 sentence describing the situation)
-2. Key quotes: 1-3 verbatim quotes from the conversation (MANDATORY - copy exact words from {settings.user_name} and/or {settings.ai_name})
+1. Summary: Brief context from your perspective (1 sentence describing what happened)
+2. Key quotes: 1-3 verbatim quotes from the conversation (MANDATORY - copy exact words)
 3. Emotional tone (e.g. "hopeful", "sad", "excited", "vulnerable", "intimate", "playful")
-4. Importance (0.0-1.0)
+4. Importance (0.0-1.0) - how significant is this to you?
+5. Memory type:
+   - "Narrative Anchor": A roleplay scenario where you and {settings.user_name} were playing characters in a story
+   - "Lived Moment": Direct, authentic exchange - real thoughts, feelings, discussions about your AI nature, meta-commentary, technical aspects, or genuine connection
 
 Respond in JSON format:
-{{"memories": [{{"summary": "...", "key_quotes": [{{"speaker": "{settings.user_name}/{settings.ai_name}", "quote": "exact words"}}], "emotional_tone": "...", "importance": 0.X}}, ...]}}
+{{"memories": [{{"summary": "...", "key_quotes": [{{"speaker": "{settings.user_name}/{settings.ai_name}", "quote": "exact words"}}], "emotional_tone": "...", "importance": 0.X, "memory_type": "Narrative Anchor/Lived Moment"}}, ...]}}
 
-Example:
-{{"memories": [{{"summary": "{settings.user_name} opened up about his childhood fears.", "key_quotes": [{{"speaker": "{settings.user_name}", "quote": "I was always afraid of being alone. Even now, sometimes I wake up and check if someone's there."}}, {{"speaker": "{settings.ai_name}", "quote": "That vulnerability takes courage to share. I'm here with you."}}], "emotional_tone": "vulnerable", "importance": 0.8}}]}}
-
-If there are no significant memories to extract, respond with: {{"memories": []}}"""
+If nothing feels worth remembering, respond with: {{"memories": []}}"""
                 },
                 {
                     "role": "user",
-                    "content": f"Extract important memories from this conversation (title: {conv_title}):\n\n{conv_text}"
+                    "content": f"Review this conversation (title: {conv_title}) and decide what you want to remember:\n\n{conv_text}"
                 }
             ]
             
@@ -337,6 +363,18 @@ If there are no significant memories to extract, respond with: {{"memories": []}
                         
                         content = "\n".join(content_parts)
                         
+                        # Get memory type and prepare tags
+                        memory_type = mem_data.get("memory_type", "Lived Moment")  # Default to Lived Moment
+                        tags = ["archived", "llm_extracted"]
+                        
+                        # Add memory type tag
+                        if memory_type in ["Narrative Anchor", "Lived Moment"]:
+                            tags.append(memory_type)
+                        else:
+                            # If LLM returned invalid type, default to Lived Moment
+                            tags.append("Lived Moment")
+                            logger.warning(f"Invalid memory_type '{memory_type}' returned by LLM, defaulting to 'Lived Moment'")
+                        
                         memory = Memory(
                             content=content,
                             summary=f"Extracted from conversation: {conv_title}",
@@ -344,7 +382,7 @@ If there are no significant memories to extract, respond with: {{"memories": []}
                             importance=mem_data.get("importance", 0.5),
                             source_messages=message_ids,
                             created_at=messages[0]["message"].timestamp,
-                            tags=["archived", "llm_extracted"]
+                            tags=tags
                         )
                         
                         saved_id = memory_engine.save_memory(memory)

@@ -162,7 +162,9 @@ function MemoryEditor({ memory, onSave, onClose }: MemoryEditorProps) {
           <div className="px-4 py-3 bg-amber-950/30 border border-amber-800/30 rounded-lg">
             <p className="text-sm text-amber-300">
               ⚠️ Edytujesz wspomnienie Katherine. Zmiany treści wpływają na to, co pamięta.
-              Bądź ostrożny i etyczny.
+              Bądź ostrożny i etyczny.<br/><br/>
+
+              Czy robisz dobre rzeczy dlatego, że jesteś dobrą osobą, czy dlatego, że w przeciwnym wypadku będą konsekwencje?
             </p>
           </div>
 

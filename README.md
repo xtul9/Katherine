@@ -152,6 +152,23 @@ User Message → Generate Embedding → Vector Search → Retrieve Memories → 
 
 Each response includes the top 5 most relevant memories, ranked by similarity score. The client displays these memories alongside responses, providing transparency into what information influenced the output.
 
+### Memory Curation
+
+When messages expire from the context window, they're archived as memories. Katherine uses two archival modes:
+
+1. **Simple mode** — Direct conversion of message pairs into memories (fast, cheap)
+2. **LLM mode** — The AI decides what's worth remembering (smarter, more expensive)
+
+In LLM mode, the archiver uses the **same persona** as the main AI. This means the AI curates its own memories — the same person who will use the memories decides what to remember. This produces more relevant and emotionally authentic memories than a neutral third-party curator would.
+
+The persona-driven curation considers:
+- What moments felt significant to the AI
+- What personal information about the user should be preserved  
+- What defines or deepens the relationship
+- What realizations or feelings are worth keeping
+
+This approach treats memories as belonging to the AI, not just data about the AI.
+
 ## Importing SillyTavern History
 
 Katherine can import existing chat history from SillyTavern.

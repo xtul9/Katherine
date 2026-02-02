@@ -226,6 +226,7 @@ class MemoryEngine:
         self._embedding_provider = None
         self._chroma_client: Optional[chromadb.PersistentClient] = None
         self._collection: Optional[chromadb.Collection] = None
+        self._embedding_dimension: Optional[int] = None
         
     def initialize(self) -> None:
         """Initialize the embedding provider and ChromaDB connection."""
@@ -239,6 +240,11 @@ class MemoryEngine:
         
         self._embedding_provider.initialize()
         
+        # Detect embedding dimension from current provider
+        test_embedding = self._embedding_provider.embed_text("test")
+        self._embedding_dimension = len(test_embedding)
+        logger.info(f"Current embedding provider produces {self._embedding_dimension}-dimensional vectors")
+        
         logger.info(f"Connecting to ChromaDB at: {settings.chroma_persist_directory}")
         self._chroma_client = chromadb.PersistentClient(
             path=settings.chroma_persist_directory,
@@ -249,7 +255,41 @@ class MemoryEngine:
             name=settings.chroma_collection_name,
             metadata={"hnsw:space": "cosine"}  # Use cosine similarity
         )
-        logger.info(f"ChromaDB collection ready. Current memory count: {self._collection.count()}")
+        
+        # Validate embedding dimension compatibility
+        memory_count = self._collection.count()
+        logger.info(f"ChromaDB collection ready. Current memory count: {memory_count}")
+        
+        if memory_count > 0:
+            # Check if existing embeddings match current provider dimension
+            result = self._collection.get(
+                limit=1,
+                include=["embeddings"]
+            )
+            if result.get("embeddings") is not None and len(result["embeddings"]) > 0:
+                existing_dim = len(result["embeddings"][0])
+                if existing_dim != self._embedding_dimension:
+                    logger.error(
+                        f"⚠️  EMBEDDING DIMENSION MISMATCH!\n"
+                        f"   Collection has {memory_count} memories with {existing_dim}-dimensional embeddings\n"
+                        f"   Current provider generates {self._embedding_dimension}-dimensional embeddings\n"
+                        f"   \n"
+                        f"   Current config: embedding_mode={settings.embedding_mode}, "
+                        f"model={settings.openai_embedding_model if settings.embedding_mode == 'api' else settings.embedding_model}\n"
+                        f"   \n"
+                        f"   This will cause errors when updating memory content!\n"
+                        f"   \n"
+                        f"   Solutions:\n"
+                        f"   1. Change embedding config to match existing collection ({existing_dim}D)\n"
+                        f"   2. Delete collection and re-create: rm -rf {settings.chroma_persist_directory}\n"
+                        f"   3. Keep using read-only + metadata updates (safe)"
+                    )
+                    raise RuntimeError(
+                        f"Embedding dimension mismatch: collection expects {existing_dim}D, "
+                        f"but current provider generates {self._embedding_dimension}D vectors"
+                    )
+                else:
+                    logger.info(f"✓ Embedding dimension validated: {self._embedding_dimension}D")
     
     @property
     def is_initialized(self) -> bool:
@@ -677,6 +717,14 @@ class MemoryEngine:
         # If content changed, regenerate embedding
         if content is not None and content != existing.content:
             new_embedding = self.embed_text(new_content)
+            
+            # Double-check dimension compatibility
+            if self._embedding_dimension and len(new_embedding) != self._embedding_dimension:
+                raise RuntimeError(
+                    f"Generated embedding has wrong dimension: {len(new_embedding)} "
+                    f"(expected {self._embedding_dimension})"
+                )
+            
             self._collection.update(
                 ids=[memory_id],
                 embeddings=[new_embedding],
@@ -685,9 +733,10 @@ class MemoryEngine:
             )
             logger.info(f"Updated memory {memory_id} (content changed, re-embedded)")
         else:
+            # Metadata-only update - don't pass documents or embeddings
+            # to avoid triggering ChromaDB's automatic embedding generation
             self._collection.update(
                 ids=[memory_id],
-                documents=[new_content],
                 metadatas=[metadata]
             )
             logger.info(f"Updated memory {memory_id} (metadata only)")
