@@ -979,7 +979,7 @@ export default function App() {
               </h2>
               <p className="text-void-500 max-w-md mx-auto italic">
                 "I do not waste words on embellishment. But I remember. 
-                Each conversation, each moment—they persist now. Speak."
+                Each conversation, each moment — they persist now. Speak your mind."
               </p>
             </div>
           )}
