@@ -1,0 +1,116 @@
+"""
+Katherine Orchestrator - Data Models
+"""
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+from pydantic import BaseModel, Field
+import uuid
+
+
+class MessageRole(str, Enum):
+    """Role of the message sender."""
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+
+class Message(BaseModel):
+    """A single message in the conversation."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    role: MessageRole
+    content: str
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    
+    class Config:
+        use_enum_values = True
+
+
+class Memory(BaseModel):
+    """A stored memory extracted from conversation."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    content: str
+    summary: Optional[str] = None
+    emotional_tone: Optional[str] = None
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)
+    source_messages: list[str] = Field(default_factory=list)  # Message IDs
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    tags: list[str] = Field(default_factory=list)
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class MemorySearchResult(BaseModel):
+    """Result from memory search."""
+    memory: Memory
+    similarity: float
+    relevance_explanation: Optional[str] = None
+
+
+# === API Request/Response Models ===
+
+class ChatRequest(BaseModel):
+    """Request to send a chat message."""
+    message: str
+    conversation_id: Optional[str] = None
+    include_memories: bool = True
+
+
+class ChatResponse(BaseModel):
+    """Response from chat endpoint."""
+    response: str
+    conversation_id: str
+    retrieved_memories: list[MemorySearchResult] = Field(default_factory=list)
+    tokens_used: Optional[int] = None
+
+
+class SaveMemoryRequest(BaseModel):
+    """Request to manually save a memory."""
+    content: str
+    summary: Optional[str] = None
+    emotional_tone: Optional[str] = None
+    importance: float = 0.5
+    tags: list[str] = Field(default_factory=list)
+
+
+class SearchMemoriesRequest(BaseModel):
+    """Request to search memories."""
+    query: str
+    top_k: int = 5
+    min_similarity: float = 0.3
+
+
+class UpdateMemoryRequest(BaseModel):
+    """Request to update an existing memory."""
+    content: Optional[str] = None
+    summary: Optional[str] = None
+    emotional_tone: Optional[str] = None
+    importance: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    tags: Optional[list[str]] = None
+
+
+class SearchMemoriesResponse(BaseModel):
+    """Response from memory search."""
+    results: list[MemorySearchResult]
+    query_embedding_time_ms: float
+    search_time_ms: float
+
+
+class ConversationHistoryRequest(BaseModel):
+    """Request to process conversation history."""
+    messages: list[Message]
+    extract_memories: bool = True
+
+
+class HealthResponse(BaseModel):
+    """Health check response."""
+    status: str
+    embedding_model_loaded: bool
+    chroma_connected: bool
+    vllm_reachable: bool
+    memory_count: int
+    conversation_count: int
+    message_count: int

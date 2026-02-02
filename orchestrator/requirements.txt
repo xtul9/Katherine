@@ -1,0 +1,34 @@
+# Katherine Memory Orchestrator - Dependencies
+# Python 3.10-3.12 recommended (3.14 has compatibility issues with ML packages)
+
+# API Framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# Data Validation
+pydantic>=2.6.0
+pydantic-settings>=2.1.0
+
+# Embeddings - using a lightweight alternative for better compatibility
+# sentence-transformers has heavy dependencies (torch, onnx)
+# We'll use the HuggingFace inference API or a lighter model
+
+# Vector Store - using newer ChromaDB with relaxed deps
+chromadb>=0.5.0
+
+# HTTP Client (for OpenRouter communication)
+httpx>=0.26.0
+
+# Async support
+aiofiles>=23.2.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Logging
+loguru>=0.7.0
+
+# Embeddings - lightweight option
+# Instead of sentence-transformers (which needs torch+onnx), we use:
+openai>=1.0.0  # For embedding API calls (OpenRouter supports embeddings too)
+tiktoken>=0.5.0  # Token counting
