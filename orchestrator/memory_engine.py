@@ -27,6 +27,19 @@ from config import settings
 from models import Memory, MemorySearchResult
 
 
+def _normalize_datetime(dt: datetime) -> datetime:
+    """Ensure datetime is timezone-aware (UTC). Naive datetimes are assumed to be UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _parse_datetime(date_str: str) -> datetime:
+    """Parse ISO datetime string and ensure it's timezone-aware (UTC)."""
+    parsed = datetime.fromisoformat(date_str)
+    return _normalize_datetime(parsed)
+
+
 # =============================================================================
 # Text Processing Utilities for BM25
 # =============================================================================
@@ -454,13 +467,15 @@ class MemoryEngine:
                 metadata = results["metadatas"][0][i]
                 embedding = results["embeddings"][0][i] if results.get("embeddings") else None
                 
+                date_str = metadata.get("created_at")
+                created_at = _parse_datetime(date_str) if date_str else datetime.now(timezone.utc)
                 memory = Memory(
                     id=memory_id,
                     content=results["documents"][0][i],
                     summary=metadata.get("summary") or None,
                     emotional_tone=metadata.get("emotional_tone") or None,
                     importance=metadata.get("importance", 0.5),
-                    created_at=datetime.fromisoformat(metadata.get("created_at", datetime.now(timezone.utc).isoformat())),
+                    created_at=created_at,
                     tags=metadata.get("tags", "").split(",") if metadata.get("tags") else [],
                     source_messages=metadata.get("source_messages", "").split(",") if metadata.get("source_messages") else []
                 )
@@ -663,13 +678,15 @@ class MemoryEngine:
             return None
         
         metadata = results["metadatas"][0]
+        date_str = metadata.get("created_at")
+        created_at = _parse_datetime(date_str) if date_str else datetime.now(timezone.utc)
         return Memory(
             id=memory_id,
             content=results["documents"][0],
             summary=metadata.get("summary") or None,
             emotional_tone=metadata.get("emotional_tone") or None,
             importance=metadata.get("importance", 0.5),
-            created_at=datetime.fromisoformat(metadata.get("created_at", datetime.now(timezone.utc).isoformat())),
+            created_at=created_at,
             tags=metadata.get("tags", "").split(",") if metadata.get("tags") else [],
             source_messages=metadata.get("source_messages", "").split(",") if metadata.get("source_messages") else []
         )
@@ -815,13 +832,15 @@ class MemoryEngine:
         if results["ids"]:
             for i, memory_id in enumerate(results["ids"]):
                 metadata = results["metadatas"][i]
+                date_str = metadata.get("created_at")
+                created_at = _parse_datetime(date_str) if date_str else datetime.now(timezone.utc)
                 memories.append(Memory(
                     id=memory_id,
                     content=results["documents"][i],
                     summary=metadata.get("summary") or None,
                     emotional_tone=metadata.get("emotional_tone") or None,
                     importance=metadata.get("importance", 0.5),
-                    created_at=datetime.fromisoformat(metadata.get("created_at", datetime.now(timezone.utc).isoformat())),
+                    created_at=created_at,
                     tags=metadata.get("tags", "").split(",") if metadata.get("tags") else [],
                     source_messages=metadata.get("source_messages", "").split(",") if metadata.get("source_messages") else []
                 ))
@@ -889,14 +908,18 @@ class MemoryEngine:
                 try:
                     created_at_str = metadata.get("created_at", "")
                     if created_at_str:
-                        created_at = datetime.fromisoformat(created_at_str)
+                        created_at = _parse_datetime(created_at_str)
                     else:
                         continue  # Skip memories without date
                 except (ValueError, TypeError):
                     continue
                 
+                # Normalize date range bounds for comparison
+                start_normalized = _normalize_datetime(start_date)
+                end_normalized = _normalize_datetime(end_date)
+                
                 # Check if within date range
-                if start_date <= created_at <= end_date:
+                if start_normalized <= created_at <= end_normalized:
                     memory = Memory(
                         id=memory_id,
                         content=docs_list[i],
