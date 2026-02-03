@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     openai_embedding_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""  # Set KATHERINE_OPENAI_API_KEY in .env (required for API embeddings)
     openai_embedding_model: str = "text-embedding-3-small"
+    # Timeout for embedding API calls (seconds)
+    embedding_timeout: float = 120.0
+    # Number of retries for embedding API calls on timeout
+    embedding_retries: int = 3
     
     # ChromaDB
     chroma_persist_directory: str = "./data/chroma"

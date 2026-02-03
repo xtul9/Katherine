@@ -152,32 +152,50 @@ class EmbeddingProvider:
             headers={
                 "Authorization": f"Bearer {settings.openai_api_key}",
             },
-            timeout=30.0
+            timeout=settings.embedding_timeout
         )
-        logger.info(f"Embedding provider initialized (OpenAI): {self._model}")
+        logger.info(f"Embedding provider initialized (OpenAI): {self._model} (timeout={settings.embedding_timeout}s, retries={settings.embedding_retries})")
     
     def embed_text(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
         return self.embed_texts([text])[0]
     
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts via OpenRouter."""
+        """Generate embeddings for multiple texts via OpenAI API with retry logic."""
         if not self._client:
             raise RuntimeError("Embedding provider not initialized")
         
-        response = self._client.post(
-            "/embeddings",
-            json={
-                "model": self._model,
-                "input": texts
-            }
-        )
-        response.raise_for_status()
+        last_exception = None
+        for attempt in range(settings.embedding_retries):
+            try:
+                response = self._client.post(
+                    "/embeddings",
+                    json={
+                        "model": self._model,
+                        "input": texts
+                    }
+                )
+                response.raise_for_status()
+                
+                data = response.json()
+                # Sort by index to maintain order
+                embeddings = sorted(data["data"], key=lambda x: x["index"])
+                return [e["embedding"] for e in embeddings]
+            except httpx.ReadTimeout as e:
+                last_exception = e
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s...
+                logger.warning(
+                    f"Embedding API timeout (attempt {attempt + 1}/{settings.embedding_retries}), "
+                    f"retrying in {wait_time}s..."
+                )
+                time.sleep(wait_time)
+            except httpx.HTTPStatusError as e:
+                # Don't retry on HTTP errors (4xx, 5xx)
+                raise
         
-        data = response.json()
-        # Sort by index to maintain order
-        embeddings = sorted(data["data"], key=lambda x: x["index"])
-        return [e["embedding"] for e in embeddings]
+        # All retries exhausted
+        logger.error(f"Embedding API failed after {settings.embedding_retries} attempts")
+        raise last_exception
     
     def close(self) -> None:
         """Close the HTTP client."""
