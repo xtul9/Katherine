@@ -22,6 +22,13 @@ class Message(BaseModel):
     content: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     
+    # Internal monologue (only for assistant messages)
+    # This is Katherine's private reflection on why she said what she said
+    internal_monologue: Optional[str] = None
+    
+    # IDs of memories that were retrieved and influenced this response
+    retrieved_memory_ids: list[str] = Field(default_factory=list)
+    
     class Config:
         use_enum_values = True
 
@@ -36,6 +43,14 @@ class Memory(BaseModel):
     source_messages: list[str] = Field(default_factory=list)  # Message IDs
     created_at: datetime = Field(default_factory=datetime.utcnow)
     tags: list[str] = Field(default_factory=list)
+    
+    # Internal monologue from the assistant's response
+    # Preserved from the original message for memory context
+    internal_monologue: Optional[str] = None
+    
+    # IDs of memories that influenced this exchange
+    # Provides causal chain: "I said X because I remembered Y and Z"
+    influencing_memory_ids: list[str] = Field(default_factory=list)
     
     class Config:
         json_encoders = {

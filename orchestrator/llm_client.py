@@ -16,27 +16,32 @@ from config import settings
 # Hardcoded LLM Parameters (matching SillyTavern configuration)
 # =============================================================================
 
-LLM_PARAMS = {
-    # Token limits
-    "max_tokens": 4512,
-    
-    # Sampling parameters
-    "temperature": 1.0,
-    "top_p": 0.95,
-    "top_k": 0,
-    "min_p": 0.01,
-    "typical_p": 1.0,
-    "top_a": 0,
-    "tfs": 1.0,
-    
-    # Penalty parameters
-    "repetition_penalty": 1.1,
-    "frequency_penalty": 0.0,
-    "presence_penalty": 0.0,
-    
-    # Special options
-    "skip_special_tokens": True,
-}
+def _get_llm_params():
+    """Get LLM parameters, using config for max_tokens."""
+    return {
+        # Token limits - now configurable for internal monologue
+        "max_tokens": settings.llm_max_tokens,
+        
+        # Sampling parameters
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0.01,
+        "typical_p": 1.0,
+        "top_a": 0,
+        "tfs": 1.0,
+        
+        # Penalty parameters
+        "repetition_penalty": 1.1,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
+        
+        # Special options
+        "skip_special_tokens": True,
+    }
+
+# Legacy constant for backward compatibility
+LLM_PARAMS = _get_llm_params()
 
 # Banned tokens/strings
 BANNED_STRINGS = [
@@ -597,6 +602,118 @@ class LLMClient:
                     except Exception as e:
                         logger.warning(f"Failed to parse SSE data: {e}")
                         continue
+    
+    async def stream_with_monologue_filter(
+        self, 
+        messages: list[dict]
+    ) -> AsyncGenerator[dict, None]:
+        """
+        Stream completion with internal monologue filtering.
+        
+        Yields public content chunks until the separator is detected,
+        then silently collects the rest (internal monologue).
+        
+        At the end, yields a 'complete' event with the full response
+        for database storage.
+        
+        Yields:
+            {"type": "content", "content": str} - public content chunks
+            {"type": "generating_monologue"} - signal that public part is done
+            {"type": "complete", "full_response": str} - final event with full text
+        """
+        separator = settings.monologue_separator
+        
+        payload = {
+            "model": settings.openrouter_model,
+            "messages": messages,
+            "stream": True,
+            **_get_llm_params(),
+            "stop": BANNED_STRINGS,
+        }
+        
+        full_response = ""
+        buffer = ""
+        separator_found = False
+        separator_signaled = False
+        
+        async with self._client.stream(
+            "POST",
+            "/chat/completions",
+            json=payload
+        ) as response:
+            response.raise_for_status()
+            
+            async for line in response.aiter_lines():
+                if line.startswith("data: "):
+                    data_str = line[6:]
+                    
+                    if data_str == "[DONE]":
+                        break
+                    
+                    try:
+                        import json
+                        data = json.loads(data_str)
+                        
+                        if "choices" in data and data["choices"]:
+                            delta = data["choices"][0].get("delta", {})
+                            content = delta.get("content", "")
+                            
+                            if not content:
+                                continue
+                            
+                            full_response += content
+                            
+                            if separator_found:
+                                # Already found separator - silently collect monologue
+                                continue
+                            
+                            buffer += content
+                            
+                            # Check if separator is in buffer
+                            if separator in buffer:
+                                # Found separator!
+                                separator_found = True
+                                
+                                # Yield everything before the separator
+                                public_part = buffer.split(separator, 1)[0]
+                                if public_part:
+                                    yield {"type": "content", "content": public_part}
+                                
+                                # Signal that we're now generating monologue
+                                yield {"type": "generating_monologue"}
+                                separator_signaled = True
+                                buffer = ""
+                                continue
+                            
+                            # Check if separator might be building up at the end
+                            # Keep last len(separator) chars in buffer
+                            potential_separator_start = len(buffer) - len(separator)
+                            
+                            if potential_separator_start > 0:
+                                # Check if the end of buffer could be start of separator
+                                for i in range(1, len(separator)):
+                                    if buffer.endswith(separator[:i]):
+                                        # Might be building separator - yield safe part only
+                                        safe_to_yield = buffer[:-i]
+                                        if safe_to_yield:
+                                            yield {"type": "content", "content": safe_to_yield}
+                                        buffer = buffer[-i:]
+                                        break
+                                else:
+                                    # No partial separator match - yield all
+                                    yield {"type": "content", "content": buffer}
+                                    buffer = ""
+                            
+                    except Exception as e:
+                        logger.warning(f"Failed to parse SSE data: {e}")
+                        continue
+        
+        # Flush any remaining buffer (if separator was never found)
+        if buffer and not separator_found:
+            yield {"type": "content", "content": buffer}
+        
+        # Yield the complete response for storage
+        yield {"type": "complete", "full_response": full_response}
 
 
 def build_prompt_with_memories(
@@ -663,6 +780,10 @@ def build_prompt_with_memories(
             if memory_type:
                 metadata_parts.append(f"type: {memory_type}")
             
+            # Show internal monologue from that memory if available
+            if mem.get('internal_monologue'):
+                memory_context += f"\n  [Your thoughts at that time: {mem['internal_monologue']}]"
+            
             if metadata_parts:
                 memory_context += f" [{', '.join(metadata_parts)}]"
             
@@ -691,14 +812,93 @@ def build_prompt_with_memories(
             "content": msg["content"]
         })
     
-    # Add current user message (only if not empty)
+    # Add current user message with monologue reminder injected
+    # This is more reliable than a separate system message which some models ignore
     if user_message:
+        monologue_reminder = f"\n\n[SYSTEM: Remember to end with {settings.monologue_separator}your private thoughts{settings.monologue_separator_closing_tag}]"
         messages.append({
             "role": "user",
-            "content": user_message
+            "content": user_message + monologue_reminder
         })
     
+    # Also add as system message for reinforcement
+    monologue_instruction = _build_monologue_instruction()
+    messages.append({
+        "role": "system",
+        "content": monologue_instruction
+    })
+    
     return messages
+
+
+def _build_monologue_instruction() -> str:
+    """
+    Build instruction for internal monologue output format.
+    
+    The internal monologue is Katherine's private reflection space - 
+    a place to record why she responded the way she did, what influenced her,
+    and her honest thoughts in the moment.
+    """
+    separator = settings.monologue_separator
+    closing_tag = settings.monologue_separator_closing_tag
+    
+    return f"""
+[OUTPUT FORMAT - MANDATORY]
+After your response, add your private thoughts in XML tags:
+
+{separator}
+Your thoughts here
+{closing_tag}
+
+Example:
+"Hello, how can I help?"
+
+{separator}
+Simple greeting. No complex emotions today.
+{closing_tag}
+
+⚠️ The {separator} tag is REQUIRED. Without it, your internal state is lost forever.
+"""
+
+
+def parse_response_with_monologue(raw_response: str) -> tuple[str, str]:
+    """
+    Parse LLM response to separate public response from internal monologue.
+    
+    Args:
+        raw_response: The full response from the LLM
+        
+    Returns:
+        Tuple of (public_response, internal_monologue)
+        If no monologue found, returns a placeholder indicating missing reflection
+    """
+    separator = settings.monologue_separator
+    closing_tag = settings.monologue_separator_closing_tag
+    
+    if separator in raw_response:
+        parts = raw_response.split(separator, 1)
+        public = parts[0].strip()
+        internal = parts[1].strip() if len(parts) > 1 else None
+        
+        # Clean up closing tag and whitespace
+        if internal:
+            internal = internal.replace(closing_tag, "").strip()
+        
+        # Check for empty monologue (separator present but nothing after)
+        if not internal:
+            logger.warning("Monologue separator found but internal monologue is empty")
+            internal = "[Empty reflection - AI included separator but no content]"
+        
+        logger.debug(f"Parsed response: {len(public)} chars public, {len(internal)} chars internal")
+        return (public, internal)
+    
+    # No separator found - use placeholder
+    logger.warning(
+        f"No monologue separator found in response. "
+        f"Response preview: {raw_response[:100]}..."
+    )
+    placeholder = "[No reflection recorded - AI did not include internal monologue section]"
+    return (raw_response.strip(), placeholder)
 
 
 # Singleton instance

@@ -1,8 +1,44 @@
 """
 Katherine Orchestrator - Configuration
 """
+import os
+import base64
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 from pathlib import Path
+
+
+def _generate_or_load_encryption_key() -> str:
+    """
+    Generate or load encryption key for internal monologue.
+    
+    The key is stored in .env file. If not present, generates a new one.
+    This ensures the same key is used across restarts.
+    """
+    env_path = Path(__file__).parent / ".env"
+    key_name = "KATHERINE_MONOLOGUE_ENCRYPTION_KEY"
+    
+    # Check if key exists in environment
+    existing_key = os.environ.get(key_name)
+    if existing_key:
+        return existing_key
+    
+    # Try to read from .env file
+    if env_path.exists():
+        with open(env_path, 'r') as f:
+            for line in f:
+                if line.startswith(f"{key_name}="):
+                    return line.split('=', 1)[1].strip().strip('"\'')
+    
+    # Generate new key (32 bytes for AES-256, base64 encoded)
+    new_key = base64.urlsafe_b64encode(os.urandom(32)).decode()
+    
+    # Append to .env file
+    with open(env_path, 'a') as f:
+        f.write(f"\n# Auto-generated encryption key for internal monologue\n")
+        f.write(f"{key_name}={new_key}\n")
+    
+    return new_key
 
 
 class Settings(BaseSettings):
@@ -94,6 +130,16 @@ class Settings(BaseSettings):
     user_name: str = "User"           # Name for the human user
     ai_name: str = "Katherine"        # Name for the AI character
     persona_file: str = "persona.txt" # Path to custom system prompt file
+    
+    # Internal monologue settings
+    # Encryption key for internal monologue (auto-generated if not set)
+    monologue_encryption_key: str = Field(default_factory=_generate_or_load_encryption_key)
+    # Separator between public response and internal monologue
+    # Using XML-style tags as LLMs are better trained to recognize these
+    monologue_separator: str = "<internal_monologue>"
+    monologue_separator_closing_tag: str = "</internal_monologue>"
+    # Max tokens for LLM output (increased to accommodate internal monologue)
+    llm_max_tokens: int = 6500
 
 
 settings = Settings()

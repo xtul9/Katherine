@@ -24,7 +24,7 @@ from models import (
     Message, MessageRole
 )
 from memory_engine import memory_engine
-from llm_client import llm_client, build_prompt_with_memories
+from llm_client import llm_client, build_prompt_with_memories, parse_response_with_monologue
 from conversation_store import conversation_store
 from archiver import archiver
 from query_expansion import query_expander
@@ -543,7 +543,8 @@ async def chat(request: ChatRequest):
             "similarity": mr.similarity,
             "created_at": mr.memory.created_at.isoformat() if mr.memory.created_at else None,
             "importance": mr.memory.importance,
-            "tags": mr.memory.tags
+            "tags": mr.memory.tags,
+            "internal_monologue": mr.memory.internal_monologue  # Include past thoughts
         }
         for mr in retrieved_memories
     ]
@@ -557,20 +558,32 @@ async def chat(request: ChatRequest):
     
     # Generate response
     try:
-        response_text = await llm_client.chat_completion(messages)
+        raw_response = await llm_client.chat_completion(messages)
     except Exception as e:
         logger.error(f"LLM error: {e}")
         raise HTTPException(status_code=503, detail=f"LLM service error: {str(e)}")
+    
+    # Parse response to separate public part from internal monologue
+    public_response, internal_monologue = parse_response_with_monologue(raw_response)
+    
+    # Get memory IDs that influenced this response
+    retrieved_memory_ids = [mr.memory.id for mr in retrieved_memories]
     
     # Store messages in SQLite (only save user message if not empty)
     if request.message:
         user_msg = Message(role=MessageRole.USER, content=request.message)
         conversation_store.add_message(conversation_id, user_msg)
-    assistant_msg = Message(role=MessageRole.ASSISTANT, content=response_text)
-    conversation_store.add_message(conversation_id, assistant_msg)
+    
+    assistant_msg = Message(role=MessageRole.ASSISTANT, content=public_response)
+    conversation_store.add_message(
+        conversation_id, 
+        assistant_msg,
+        internal_monologue=internal_monologue,
+        retrieved_memory_ids=retrieved_memory_ids
+    )
     
     return ChatResponse(
-        response=response_text,
+        response=public_response,  # Only public part sent to user
         conversation_id=conversation_id,
         retrieved_memories=retrieved_memories
     )
@@ -705,7 +718,8 @@ async def chat_stream(request: ChatRequest):
             "similarity": mr.similarity,
             "created_at": mr.memory.created_at.isoformat() if mr.memory.created_at else None,
             "importance": mr.memory.importance,
-            "tags": mr.memory.tags
+            "tags": mr.memory.tags,
+            "internal_monologue": mr.memory.internal_monologue  # Include past thoughts
         }
         for mr in retrieved_memories
     ]
@@ -718,6 +732,7 @@ async def chat_stream(request: ChatRequest):
     
     async def generate():
         full_response = ""
+        internal_monologue = None
         
         # First, send metadata with full memory details
         memories_data = [
@@ -733,20 +748,41 @@ async def chat_stream(request: ChatRequest):
         yield f"data: {json.dumps({'type': 'meta', 'conversation_id': conversation_id, 'memories': memories_data})}\n\n"
         
         try:
-            stream = await llm_client.chat_completion(messages, stream=True)
-            async for chunk in stream:
-                full_response += chunk
-                yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
+            # Use the new filtered streaming that hides internal monologue
+            async for event in llm_client.stream_with_monologue_filter(messages):
+                if event["type"] == "content":
+                    # Stream public content to user
+                    yield f"data: {json.dumps(event)}\n\n"
+                elif event["type"] == "generating_monologue":
+                    # Signal that public response is complete, but we're still generating
+                    # User sees this as a brief "thinking" moment
+                    yield f"data: {json.dumps({'type': 'thinking'})}\n\n"
+                elif event["type"] == "complete":
+                    # Full response received - parse and save
+                    full_response = event["full_response"]
         except Exception as e:
+            logger.error(f"Stream error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
             return
+        
+        # Parse the full response to extract internal monologue
+        public_response, internal_monologue = parse_response_with_monologue(full_response)
+        
+        # Get memory IDs that influenced this response
+        retrieved_memory_ids = [mr.memory.id for mr in retrieved_memories]
         
         # Store in SQLite (only save user message if not empty)
         if request.message:
             user_msg = Message(role=MessageRole.USER, content=request.message)
             conversation_store.add_message(conversation_id, user_msg)
-        assistant_msg = Message(role=MessageRole.ASSISTANT, content=full_response)
-        conversation_store.add_message(conversation_id, assistant_msg)
+        
+        assistant_msg = Message(role=MessageRole.ASSISTANT, content=public_response)
+        conversation_store.add_message(
+            conversation_id, 
+            assistant_msg,
+            internal_monologue=internal_monologue,
+            retrieved_memory_ids=retrieved_memory_ids
+        )
         
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
     

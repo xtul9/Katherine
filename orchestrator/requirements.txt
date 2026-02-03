@@ -28,6 +28,9 @@ python-dotenv>=1.0.0
 # Logging
 loguru>=0.7.0
 
+# Encryption (for internal monologue)
+cryptography>=41.0.0
+
 # Embeddings - lightweight option
 # Instead of sentence-transformers (which needs torch+onnx), we use:
 openai>=1.0.0  # For embedding API calls (OpenRouter supports embeddings too)

@@ -366,7 +366,9 @@ class MemoryEngine:
             "importance": memory.importance,
             "created_at": memory.created_at.isoformat(),
             "tags": ",".join(memory.tags),
-            "source_messages": ",".join(memory.source_messages)
+            "source_messages": ",".join(memory.source_messages),
+            "internal_monologue": memory.internal_monologue or "",
+            "influencing_memory_ids": ",".join(memory.influencing_memory_ids) if memory.influencing_memory_ids else ""
         }
         
         self._collection.add(
@@ -477,7 +479,9 @@ class MemoryEngine:
                     importance=metadata.get("importance", 0.5),
                     created_at=created_at,
                     tags=metadata.get("tags", "").split(",") if metadata.get("tags") else [],
-                    source_messages=metadata.get("source_messages", "").split(",") if metadata.get("source_messages") else []
+                    source_messages=metadata.get("source_messages", "").split(",") if metadata.get("source_messages") else [],
+                    internal_monologue=metadata.get("internal_monologue") or None,
+                    influencing_memory_ids=metadata.get("influencing_memory_ids", "").split(",") if metadata.get("influencing_memory_ids") else []
                 )
                 
                 semantic_candidates[memory_id] = (memory, embedding, semantic_sim)
@@ -688,7 +692,9 @@ class MemoryEngine:
             importance=metadata.get("importance", 0.5),
             created_at=created_at,
             tags=metadata.get("tags", "").split(",") if metadata.get("tags") else [],
-            source_messages=metadata.get("source_messages", "").split(",") if metadata.get("source_messages") else []
+            source_messages=metadata.get("source_messages", "").split(",") if metadata.get("source_messages") else [],
+            internal_monologue=metadata.get("internal_monologue") or None,
+            influencing_memory_ids=metadata.get("influencing_memory_ids", "").split(",") if metadata.get("influencing_memory_ids") else []
         )
     
     def update_memory(
@@ -728,7 +734,9 @@ class MemoryEngine:
             "importance": new_importance,
             "created_at": existing.created_at.isoformat(),
             "tags": ",".join(new_tags),
-            "source_messages": ",".join(existing.source_messages)
+            "source_messages": ",".join(existing.source_messages),
+            "internal_monologue": existing.internal_monologue or "",
+            "influencing_memory_ids": ",".join(existing.influencing_memory_ids) if existing.influencing_memory_ids else ""
         }
         
         # If content changed, regenerate embedding
@@ -767,7 +775,9 @@ class MemoryEngine:
             importance=new_importance,
             created_at=existing.created_at,
             tags=new_tags,
-            source_messages=existing.source_messages
+            source_messages=existing.source_messages,
+            internal_monologue=existing.internal_monologue,
+            influencing_memory_ids=existing.influencing_memory_ids
         )
     
     def delete_memory(self, memory_id: str) -> bool:
@@ -842,7 +852,9 @@ class MemoryEngine:
                     importance=metadata.get("importance", 0.5),
                     created_at=created_at,
                     tags=metadata.get("tags", "").split(",") if metadata.get("tags") else [],
-                    source_messages=metadata.get("source_messages", "").split(",") if metadata.get("source_messages") else []
+                    source_messages=metadata.get("source_messages", "").split(",") if metadata.get("source_messages") else [],
+                    internal_monologue=metadata.get("internal_monologue") or None,
+                    influencing_memory_ids=metadata.get("influencing_memory_ids", "").split(",") if metadata.get("influencing_memory_ids") else []
                 ))
         
         # Sort by created_at, newest first
@@ -928,7 +940,9 @@ class MemoryEngine:
                         importance=metadata.get("importance", 0.5),
                         created_at=created_at,
                         tags=metadata.get("tags", "").split(",") if metadata.get("tags") else [],
-                        source_messages=metadata.get("source_messages", "").split(",") if metadata.get("source_messages") else []
+                        source_messages=metadata.get("source_messages", "").split(",") if metadata.get("source_messages") else [],
+                        internal_monologue=metadata.get("internal_monologue") or None,
+                        influencing_memory_ids=metadata.get("influencing_memory_ids", "").split(",") if metadata.get("influencing_memory_ids") else []
                     )
                     
                     # Calculate similarity (1.0 for date-only search, or from semantic search)

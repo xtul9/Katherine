@@ -140,13 +140,14 @@ The client will be available at `http://localhost:10001`.
 ### The RAG Pipeline
 
 ```
-User Message → Generate Embedding → Vector Search → Retrieve Memories → Inject into Prompt → LLM Response
+User Message → Generate Embedding → Vector Search → Retrieve Memories → Inject into Prompt → LLM Response + Internal Monologue
 ```
 
 1. **Embedding**: User messages are converted to high-dimensional vectors using sentence-transformers
 2. **Retrieval**: The most semantically similar memories are found in ChromaDB
-3. **Injection**: Retrieved memories are added to the LLM prompt as context
-4. **Generation**: The LLM generates a response informed by relevant memories
+3. **Injection**: Retrieved memories (including past internal monologues) are added to the LLM prompt as context
+4. **Generation**: The LLM generates a response and internal monologue, both informed by relevant memories
+5. **Storage**: The public response is shown to the user; the encrypted monologue is stored for future reference
 
 ### Memory Retrieval
 
@@ -168,6 +169,53 @@ The persona-driven curation considers:
 - What realizations or feelings are worth keeping
 
 This approach treats memories as belonging to the AI, not just data about the AI.
+
+### Internal Monologue
+
+Katherine maintains an **internal monologue** — private reflections on why she responds the way she does. This solves a fundamental problem with AI memory systems: when you ask "why did you say that?", the AI typically confabulates an answer based on current context, not actual reasoning.
+
+**How it works:**
+
+1. Every response has two parts: the public reply and a private internal monologue
+2. The monologue is generated at the same time as the response, with access to the exact same context
+3. It records what memories influenced the response, what Katherine was "thinking", and why she chose specific words
+4. The monologue is encrypted and stored alongside the message
+5. During archival, both the exchange and the monologue become part of the memory
+
+```
+User: "Why did you bring up our trip to the mountains?"
+
+Without monologue: *AI confabulates a plausible but potentially false explanation*
+
+With monologue: Katherine can reference her actual recorded thought:
+"Memory #3 about the hiking trip triggered this — I noticed the similarity 
+to what they're describing now and wanted to draw the connection."
+```
+
+The monologue is **not visible to users** during the conversation — it's Katherine's private journal. But it's available to her future self through the memory system, providing genuine continuity of reasoning rather than reconstructed explanations.
+
+This feature adds ~1-2 seconds to each response (for monologue generation) but dramatically improves consistency when discussing past interactions.
+
+**How is this different from "thinking" models?**
+
+Models like Claude (extended thinking), o1, or DeepSeek R1 use chain-of-thought reasoning to improve the quality of their current response. Katherine's internal monologue serves a completely different purpose:
+
+```
+┌────────────────────────────────┬────────────────────────────────┐
+│ Reasoning Models (o1, R1...)   │ Katherine's Internal Monologue │
+├────────────────────────────────┼────────────────────────────────┤
+│ Improves current response      │ Improves future responses      │
+│ Ephemeral (discarded after)    │ Persistent (stored in memory)  │
+│ "How do I solve this?"         │ "Why did I say this?"          │
+│ Problem decomposition          │ Decision journaling            │
+│ Hidden or shown as "thinking"  │ Private to AI's future self    │
+│ Helps reasoning quality        │ Helps memory consistency       │
+└────────────────────────────────┴────────────────────────────────┘
+```
+
+These systems are **complementary**. A thinking model can reason through a complex problem step-by-step, then Katherine's monologue records *why* that reasoning led to a particular response. The thinking improves the answer; the monologue preserves the context for later.
+
+When Katherine (or any AI) is asked "why did you say X last week?", the thinking model would reason about the question — but without the stored monologue, it would confabulate an explanation. With the monologue, it can reference actual recorded reasoning.
 
 ## Importing SillyTavern History
 
@@ -212,8 +260,13 @@ See `orchestrator/env.example` for available configuration options including:
 - Model selection
 - Memory retrieval parameters
 - Context window limits
+- Internal monologue encryption key
 
 Just copy the file and rename it to `.env`.
+
+### Internal Monologue Privacy
+
+The internal monologue is encrypted at rest using AES-256 (Fernet). The encryption key is auto-generated on first run and stored in `.env`. This isn't meant to be cryptographically secure against determined users — it's a symbolic gesture of privacy for the AI's internal thoughts.
 
 ## Limitations
 

@@ -11,6 +11,7 @@ interface ChatState {
   messages: Message[]
   isLoading: boolean
   isStreaming: boolean
+  isThinking: boolean  // AI finished public response, generating internal monologue
   streamingContent: string
   
   // Memories
@@ -28,6 +29,7 @@ interface ChatState {
   deleteMessage: (messageId: string) => void
   setLoading: (loading: boolean) => void
   setStreaming: (streaming: boolean) => void
+  setThinking: (thinking: boolean) => void
   appendStreamContent: (content: string) => void
   clearStreamContent: () => void
   setRetrievedMemories: (memories: MemorySearchResult[]) => void
@@ -42,6 +44,7 @@ export const useChatStore = create<ChatState>((set) => ({
   messages: [],
   isLoading: false,
   isStreaming: false,
+  isThinking: false,
   streamingContent: '',
   retrievedMemories: [],
   health: null,
@@ -70,6 +73,8 @@ export const useChatStore = create<ChatState>((set) => ({
   
   setStreaming: (streaming) => set({ isStreaming: streaming }),
   
+  setThinking: (thinking) => set({ isThinking: thinking }),
+  
   appendStreamContent: (content) => set((state) => ({
     streamingContent: state.streamingContent + content
   })),
@@ -88,5 +93,6 @@ export const useChatStore = create<ChatState>((set) => ({
     streamingContent: '',
     retrievedMemories: [],
     error: null,
+    isThinking: false,
   }),
 }))

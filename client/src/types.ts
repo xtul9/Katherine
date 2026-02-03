@@ -68,7 +68,7 @@ export interface StreamMemory {
 }
 
 export interface StreamEvent {
-  type: 'meta' | 'content' | 'error' | 'done'
+  type: 'meta' | 'content' | 'error' | 'done' | 'thinking'
   content?: string
   conversation_id?: string
   memories?: StreamMemory[]  // Full memory data from streaming

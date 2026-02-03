@@ -7,15 +7,61 @@ This is not just for Katherine—it's for Michael too.
 """
 import sqlite3
 import json
+import base64
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from contextlib import contextmanager
 
+from cryptography.fernet import Fernet
 from loguru import logger
 
 from config import settings
 from models import Message, MessageRole
+
+
+# =============================================================================
+# Encryption utilities for internal monologue
+# =============================================================================
+
+def _get_fernet() -> Fernet:
+    """Get Fernet instance for encryption/decryption."""
+    # Ensure the key is properly padded for Fernet (32 bytes, base64 encoded)
+    key = settings.monologue_encryption_key
+    # If it's not a valid Fernet key, create one from it
+    try:
+        return Fernet(key.encode() if isinstance(key, str) else key)
+    except Exception:
+        # Hash the key to get consistent 32 bytes, then base64 encode
+        import hashlib
+        key_bytes = hashlib.sha256(key.encode()).digest()
+        fernet_key = base64.urlsafe_b64encode(key_bytes)
+        return Fernet(fernet_key)
+
+
+def encrypt_monologue(plaintext: Optional[str]) -> Optional[str]:
+    """Encrypt internal monologue for storage."""
+    if not plaintext:
+        return None
+    
+    fernet = _get_fernet()
+    encrypted = fernet.encrypt(plaintext.encode('utf-8'))
+    return base64.urlsafe_b64encode(encrypted).decode('ascii')
+
+
+def decrypt_monologue(ciphertext: Optional[str]) -> Optional[str]:
+    """Decrypt internal monologue from storage."""
+    if not ciphertext:
+        return None
+    
+    try:
+        fernet = _get_fernet()
+        encrypted = base64.urlsafe_b64decode(ciphertext.encode('ascii'))
+        decrypted = fernet.decrypt(encrypted)
+        return decrypted.decode('utf-8')
+    except Exception as e:
+        logger.warning(f"Failed to decrypt monologue: {e}")
+        return None
 
 
 class ConversationStore:
@@ -79,6 +125,18 @@ class ConversationStore:
                 CREATE INDEX IF NOT EXISTS idx_conversations_updated 
                 ON conversations(updated_at);
             """)
+            
+            # Add new columns for internal monologue (encrypted) and retrieved memory IDs
+            # These columns may already exist, so we use ALTER TABLE with error handling
+            try:
+                conn.execute("ALTER TABLE messages ADD COLUMN internal_monologue TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            
+            try:
+                conn.execute("ALTER TABLE messages ADD COLUMN retrieved_memory_ids TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         
         logger.info(f"Conversation store initialized: {self.db_path}")
     
@@ -231,24 +289,46 @@ class ConversationStore:
     # Message CRUD
     # =========================================================================
     
-    def add_message(self, conversation_id: str, message: Message) -> Message:
-        """Add a message to a conversation."""
+    def add_message(
+        self, 
+        conversation_id: str, 
+        message: Message,
+        internal_monologue: Optional[str] = None,
+        retrieved_memory_ids: Optional[list[str]] = None
+    ) -> Message:
+        """
+        Add a message to a conversation.
+        
+        Args:
+            conversation_id: The conversation ID
+            message: The message to add
+            internal_monologue: Optional internal monologue (will be encrypted)
+            retrieved_memory_ids: Optional list of memory IDs that influenced this response
+        """
         # Ensure conversation exists
         if not self.conversation_exists(conversation_id):
             self.create_conversation(conversation_id)
         
+        # Encrypt internal monologue if provided
+        encrypted_monologue = encrypt_monologue(internal_monologue)
+        
+        # Serialize retrieved memory IDs
+        memory_ids_str = ",".join(retrieved_memory_ids) if retrieved_memory_ids else None
+        
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO messages (id, conversation_id, role, content, timestamp)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO messages (id, conversation_id, role, content, timestamp, internal_monologue, retrieved_memory_ids)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.id,
                     conversation_id,
                     message.role,
                     message.content,
-                    message.timestamp.isoformat() if isinstance(message.timestamp, datetime) else message.timestamp
+                    message.timestamp.isoformat() if isinstance(message.timestamp, datetime) else message.timestamp,
+                    encrypted_monologue,
+                    memory_ids_str
                 )
             )
             
@@ -258,13 +338,18 @@ class ConversationStore:
                 (datetime.now(timezone.utc).isoformat(), conversation_id)
             )
         
+        # Update message object with the new fields
+        message.internal_monologue = internal_monologue
+        message.retrieved_memory_ids = retrieved_memory_ids or []
+        
         return message
     
     def get_messages(
         self, 
         conversation_id: str, 
         limit: Optional[int] = None,
-        since: Optional[datetime] = None
+        since: Optional[datetime] = None,
+        include_monologue: bool = False
     ) -> list[Message]:
         """
         Get messages from a conversation.
@@ -273,6 +358,7 @@ class ConversationStore:
             conversation_id: The conversation ID
             limit: Max number of messages (newest first, then reversed)
             since: Only messages after this timestamp
+            include_monologue: If True, decrypt and include internal monologue
         """
         with self._get_connection() as conn:
             if since:
@@ -305,11 +391,23 @@ class ConversationStore:
         
         messages = []
         for row in rows:
+            # Decrypt internal monologue if requested and available
+            internal_monologue = None
+            if include_monologue:
+                encrypted = row["internal_monologue"] if "internal_monologue" in row.keys() else None
+                internal_monologue = decrypt_monologue(encrypted)
+            
+            # Parse retrieved memory IDs
+            memory_ids_str = row["retrieved_memory_ids"] if "retrieved_memory_ids" in row.keys() else None
+            retrieved_memory_ids = memory_ids_str.split(",") if memory_ids_str else []
+            
             messages.append(Message(
                 id=row["id"],
                 role=MessageRole(row["role"]),
                 content=row["content"],
-                timestamp=datetime.fromisoformat(row["timestamp"])
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                internal_monologue=internal_monologue,
+                retrieved_memory_ids=retrieved_memory_ids
             ))
         
         return messages
@@ -363,7 +461,7 @@ class ConversationStore:
                 timestamp=datetime.fromisoformat(row["timestamp"])
             )
     
-    def get_message(self, message_id: str) -> Optional[Message]:
+    def get_message(self, message_id: str, include_monologue: bool = False) -> Optional[Message]:
         """Get a specific message by ID."""
         with self._get_connection() as conn:
             row = conn.execute(
@@ -374,11 +472,23 @@ class ConversationStore:
         if not row:
             return None
         
+        # Decrypt internal monologue if requested
+        internal_monologue = None
+        if include_monologue:
+            encrypted = row["internal_monologue"] if "internal_monologue" in row.keys() else None
+            internal_monologue = decrypt_monologue(encrypted)
+        
+        # Parse retrieved memory IDs
+        memory_ids_str = row["retrieved_memory_ids"] if "retrieved_memory_ids" in row.keys() else None
+        retrieved_memory_ids = memory_ids_str.split(",") if memory_ids_str else []
+        
         return Message(
             id=row["id"],
             role=MessageRole(row["role"]),
             content=row["content"],
-            timestamp=datetime.fromisoformat(row["timestamp"])
+            timestamp=datetime.fromisoformat(row["timestamp"]),
+            internal_monologue=internal_monologue,
+            retrieved_memory_ids=retrieved_memory_ids
         )
     
     # =========================================================================
@@ -703,12 +813,18 @@ class ConversationStore:
     def get_unarchived_expired_messages(
         self,
         window_hours: Optional[int] = None,
-        limit: int = 100
+        limit: int = 100,
+        include_monologue: bool = True
     ) -> list[dict]:
         """
         Get expired messages that haven't been archived yet.
         
         These are candidates for archival to ChromaDB.
+        
+        Args:
+            window_hours: Override the default context window
+            limit: Maximum number of messages to return
+            include_monologue: If True, decrypt and include internal monologue
         """
         hours = window_hours or settings.context_window_hours
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -734,12 +850,24 @@ class ConversationStore:
         
         results = []
         for row in rows:
+            # Decrypt internal monologue if requested
+            internal_monologue = None
+            if include_monologue:
+                encrypted = row["internal_monologue"] if "internal_monologue" in row.keys() else None
+                internal_monologue = decrypt_monologue(encrypted)
+            
+            # Parse retrieved memory IDs
+            memory_ids_str = row["retrieved_memory_ids"] if "retrieved_memory_ids" in row.keys() else None
+            retrieved_memory_ids = memory_ids_str.split(",") if memory_ids_str else []
+            
             results.append({
                 "message": Message(
                     id=row["id"],
                     role=MessageRole(row["role"]),
                     content=row["content"],
-                    timestamp=datetime.fromisoformat(row["timestamp"])
+                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    internal_monologue=internal_monologue,
+                    retrieved_memory_ids=retrieved_memory_ids
                 ),
                 "conversation_id": row["conversation_id"],
                 "conversation_title": row["conversation_title"]

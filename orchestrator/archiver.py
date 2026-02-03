@@ -218,9 +218,17 @@ class MessageArchiver:
         content += f"{settings.user_name}: {user_msg.content}\n"
         content += f"{settings.ai_name}: {assistant_msg.content}"
         
-        # Truncate if too long
-        if len(content) > 2000:
-            content = content[:1997] + "..."
+        # Add internal monologue if available
+        internal_monologue = getattr(assistant_msg, 'internal_monologue', None)
+        if internal_monologue:
+            content += f"\n\n[{settings.ai_name}'s thoughts]: {internal_monologue}"
+        
+        # Get influencing memory IDs from the assistant message
+        influencing_ids = getattr(assistant_msg, 'retrieved_memory_ids', []) or []
+        
+        # Truncate if too long (but preserve monologue if possible)
+        if len(content) > 2500:
+            content = content[:2497] + "..."
         
         return Memory(
             content=content,
@@ -229,7 +237,9 @@ class MessageArchiver:
             importance=0.5,
             source_messages=[user_msg.id, assistant_msg.id],
             created_at=user_msg.timestamp,
-            tags=["archived", "conversation", "Lived Moment"]  # Default to Lived Moment in simple mode
+            tags=["archived", "conversation", "Lived Moment"],  # Default to Lived Moment in simple mode
+            internal_monologue=internal_monologue,
+            influencing_memory_ids=influencing_ids
         )
     
     def _create_memory_from_single(
@@ -243,8 +253,18 @@ class MessageArchiver:
         content = f"[Conversation: {conversation_title or 'untitled'}]\n"
         content += f"{role_name}: {msg.content}"
         
-        if len(content) > 2000:
-            content = content[:1997] + "..."
+        # Add internal monologue if available (only for assistant messages)
+        internal_monologue = None
+        influencing_ids = []
+        if msg.role == "assistant":
+            internal_monologue = getattr(msg, 'internal_monologue', None)
+            influencing_ids = getattr(msg, 'retrieved_memory_ids', []) or []
+            
+            if internal_monologue:
+                content += f"\n\n[{settings.ai_name}'s thoughts]: {internal_monologue}"
+        
+        if len(content) > 2500:
+            content = content[:2497] + "..."
         
         return Memory(
             content=content,
@@ -253,7 +273,9 @@ class MessageArchiver:
             importance=0.4,
             source_messages=[msg.id],
             created_at=msg.timestamp,
-            tags=["archived", "single_message", "Lived Moment"]  # Default to Lived Moment in simple mode
+            tags=["archived", "single_message", "Lived Moment"],  # Default to Lived Moment in simple mode
+            internal_monologue=internal_monologue,
+            influencing_memory_ids=influencing_ids
         )
     
     async def _archive_with_llm(self, expired: list[dict]) -> ArchiveResult:
@@ -375,6 +397,22 @@ If nothing feels worth remembering, respond with: {{"memories": []}}"""
                             tags.append("Lived Moment")
                             logger.warning(f"Invalid memory_type '{memory_type}' returned by LLM, defaulting to 'Lived Moment'")
                         
+                        # Collect internal monologues and influencing memory IDs from assistant messages
+                        combined_monologues = []
+                        all_influencing_ids = set()
+                        for m in messages:
+                            if m["message"].role == "assistant":
+                                msg_monologue = getattr(m["message"], 'internal_monologue', None)
+                                if msg_monologue:
+                                    combined_monologues.append(msg_monologue)
+                                msg_influences = getattr(m["message"], 'retrieved_memory_ids', [])
+                                if msg_influences:
+                                    all_influencing_ids.update(msg_influences)
+                        
+                        # Add combined monologues to content if available
+                        if combined_monologues:
+                            content += f"\n\n[{settings.ai_name}'s thoughts]: {' | '.join(combined_monologues)}"
+                        
                         memory = Memory(
                             content=content,
                             summary=f"Extracted from conversation: {conv_title}",
@@ -382,7 +420,9 @@ If nothing feels worth remembering, respond with: {{"memories": []}}"""
                             importance=mem_data.get("importance", 0.5),
                             source_messages=message_ids,
                             created_at=messages[0]["message"].timestamp,
-                            tags=tags
+                            tags=tags,
+                            internal_monologue=" | ".join(combined_monologues) if combined_monologues else None,
+                            influencing_memory_ids=list(all_influencing_ids)
                         )
                         
                         saved_id = memory_engine.save_memory(memory)

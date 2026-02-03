@@ -719,6 +719,7 @@ export default function App() {
     messages,
     isLoading,
     isStreaming,
+    isThinking,
     streamingContent,
     conversationId,
     setConversationId,
@@ -728,6 +729,7 @@ export default function App() {
     deleteMessage,
     setLoading,
     setStreaming,
+    setThinking,
     appendStreamContent,
     clearStreamContent,
     setRetrievedMemories,
@@ -817,6 +819,11 @@ export default function App() {
           } else if (event.type === 'content' && event.content) {
             fullContent += event.content
             appendStreamContent(event.content)
+          } else if (event.type === 'thinking') {
+            // AI finished public response, now generating internal monologue
+            // Stop showing streaming cursor, show "thinking" indicator instead
+            setStreaming(false)
+            setThinking(true)
           } else if (event.type === 'error') {
             throw new Error(event.error)
           } else if (event.type === 'done') {
@@ -852,6 +859,7 @@ export default function App() {
       } finally {
         setLoading(false)
         setStreaming(false)
+        setThinking(false)
         clearStreamContent()
       }
     },
@@ -860,6 +868,7 @@ export default function App() {
       addMessage,
       setLoading,
       setStreaming,
+      setThinking,
       setError,
       setConversationId,
       appendStreamContent,
@@ -993,7 +1002,8 @@ export default function App() {
             />
           ))}
 
-          {isStreaming && streamingContent && (
+          {/* Show streaming content during streaming OR thinking (monologue generation) */}
+          {(isStreaming || isThinking) && streamingContent && (
             <MessageBubble
               message={{
                 id: 'streaming',
@@ -1001,17 +1011,34 @@ export default function App() {
                 content: streamingContent,
                 timestamp: new Date().toISOString(),
               }}
-              isStreaming
+              isStreaming={isStreaming && !isThinking}  // Only show typing cursor during actual streaming
             />
           )}
 
-          {isLoading && !streamingContent && (
+          {isLoading && !streamingContent && !isThinking && (
             <div className="flex justify-start animate-fade-in">
               <div className="px-5 py-4 bg-void-800/80 rounded-2xl">
                 <div className="flex gap-1.5">
                   <span className="w-2 h-2 bg-void-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                   <span className="w-2 h-2 bg-void-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
                   <span className="w-2 h-2 bg-void-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Thinking indicator - AI finished public response, processing internal monologue */}
+          {isThinking && (
+            <div className="flex justify-start animate-fade-in">
+              <div className="px-5 py-3 bg-gradient-to-r from-aether-900/60 to-void-800/60 rounded-2xl border border-aether-700/30 backdrop-blur-sm">
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    <div className="w-4 h-4 rounded-full bg-aether-500/30 animate-ping absolute" />
+                    <div className="w-4 h-4 rounded-full bg-aether-400" />
+                  </div>
+                  <span className="text-sm text-aether-300 italic">
+                    Reflecting...
+                  </span>
                 </div>
               </div>
             </div>
@@ -1027,7 +1054,7 @@ export default function App() {
           <MemoryIndicator />
         </div>
         <div className="max-w-3xl mx-auto">
-          <ChatInput onSend={handleSend} disabled={isLoading} />
+          <ChatInput onSend={handleSend} disabled={isLoading || isThinking} />
         </div>
         <div className="max-w-3xl mx-auto">
           <StatusBar conversationId={conversationId} />
