@@ -130,6 +130,15 @@ class Settings(BaseSettings):
     max_context_tokens: int = 4096
     max_memory_injection_tokens: int = 1024
     
+    # Reddit integration settings
+    # Inject top posts from subreddits into AI context for current events awareness
+    reddit_enabled: bool = True
+    reddit_subreddit: str = "geopolitics"  # Subreddit to fetch from (without r/)
+    reddit_posts_limit: int = 5  # Number of top posts to fetch
+    reddit_time_filter: str = "day"  # Time period: hour, day, week, month, year, all
+    reddit_cache_ttl_seconds: int = 900  # Cache posts for 15 minutes to avoid rate limits
+    reddit_min_ss_length: int = 100  # Minimum characters for a valid submission statement
+    
     # Persona configuration (for privacy - keep personal details out of code)
     user_name: str = "User"           # Name for the human user
     ai_name: str = "Katherine"        # Name for the AI character

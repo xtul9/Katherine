@@ -720,7 +720,8 @@ def build_prompt_with_memories(
     user_message: str,
     conversation_history: list[dict],
     memories: list[dict],
-    system_prompt: Optional[str] = None
+    system_prompt: Optional[str] = None,
+    reddit_posts: Optional[list[dict]] = None
 ) -> list[dict]:
     """
     Build the full prompt with Katherine's personality and injected memories.
@@ -731,6 +732,7 @@ def build_prompt_with_memories(
         conversation_history: Recent conversation messages
         memories: Retrieved relevant memories to inject
         system_prompt: Optional custom system prompt (defaults to Katherine's full prompt)
+        reddit_posts: Optional list of Reddit posts to inject for current events context
     
     Returns:
         List of messages ready for the LLM
@@ -804,6 +806,15 @@ def build_prompt_with_memories(
         })
     else:
         logger.warning("No memories to inject into prompt!")
+    
+    # Inject Reddit posts for current events awareness
+    if reddit_posts:
+        reddit_context = _build_reddit_context(reddit_posts)
+        messages.append({
+            "role": "system",
+            "content": reddit_context
+        })
+        logger.info(f"Injecting {len(reddit_posts)} Reddit posts into prompt")
     
     # Add conversation history
     for msg in conversation_history:
@@ -920,6 +931,54 @@ def parse_response_with_monologue(raw_response: str) -> tuple[str, str]:
     )
     placeholder = "[No reflection recorded - AI did not include internal monologue section]"
     return (raw_response.strip(), placeholder)
+
+
+def _build_reddit_context(reddit_posts: list[dict]) -> str:
+    """
+    Build the context block for Reddit posts injection.
+    
+    This provides the AI with current events awareness from subreddits
+    like r/geopolitics, including submission statements that provide
+    context and analysis for linked articles.
+    
+    Args:
+        reddit_posts: List of post dictionaries with title, url, submission_statement, etc.
+    
+    Returns:
+        Formatted context string for injection into the prompt
+    """
+    context = "\n\n[CURRENT EVENTS - Reddit r/geopolitics]\n"
+    context += "The following are top posts from r/geopolitics. Each includes the original poster's "
+    context += "submission statement which provides context and analysis.\n"
+    context += "You can reference these naturally in conversation when relevant to the discussion.\n\n"
+    
+    for i, post in enumerate(reddit_posts, 1):
+        context += f"━━━ Post {i} ━━━\n"
+        context += f"Title: {post['title']}\n"
+        context += f"Score: {post['score']} | Comments: {post.get('num_comments', 'N/A')} | Posted: {post['created']}\n"
+        
+        # Include submission statement if available
+        ss = post.get('submission_statement')
+        if ss:
+            # Truncate very long submission statements
+            if len(ss) > 1500:
+                ss = ss[:1500] + "... [truncated]"
+            context += f"\nSubmission Statement:\n{ss}\n"
+        elif post.get('selftext'):
+            selftext = post['selftext']
+            if len(selftext) > 1500:
+                selftext = selftext[:1500] + "... [truncated]"
+            context += f"\nContent:\n{selftext}\n"
+        else:
+            context += "\n(No submission statement available)\n"
+        
+        context += f"\nSource: {post['url']}\n"
+        context += f"Discussion: {post['permalink']}\n\n"
+    
+    context += "[END OF REDDIT POSTS]\n"
+    context += "Note: These posts reflect current geopolitical discussions and may be useful context.\n"
+    
+    return context
 
 
 # Singleton instance

@@ -28,6 +28,7 @@ from llm_client import llm_client, build_prompt_with_memories, parse_response_wi
 from conversation_store import conversation_store
 from archiver import archiver
 from query_expansion import query_expander
+from reddit_client import reddit_client
 
 
 def _extract_question(text: str) -> str:
@@ -349,6 +350,11 @@ async def lifespan(app: FastAPI):
         await query_expander.initialize()
         logger.info("Query expansion enabled")
     
+    # Initialize Reddit client if enabled
+    if settings.reddit_enabled:
+        await reddit_client.initialize()
+        logger.info(f"Reddit integration enabled (r/{settings.reddit_subreddit})")
+    
     # Start background archiver if enabled
     if settings.auto_archival_enabled:
         await background_archiver.start()
@@ -362,6 +368,7 @@ async def lifespan(app: FastAPI):
     await background_archiver.stop()
     await llm_client.close()
     await query_expander.close()
+    await reddit_client.close()
     logger.info("Goodbye.")
 
 
@@ -549,11 +556,21 @@ async def chat(request: ChatRequest):
         for mr in retrieved_memories
     ]
     
+    # Fetch Reddit posts for current events context
+    reddit_posts = None
+    if settings.reddit_enabled:
+        try:
+            posts = await reddit_client.get_top_posts()
+            reddit_posts = [p.to_dict() for p in posts]
+        except Exception as e:
+            logger.warning(f"Failed to fetch Reddit posts: {e}")
+    
     # Build prompt with injected memories (RAG injection step)
     messages = build_prompt_with_memories(
         user_message=request.message,
         conversation_history=history,
-        memories=memory_dicts
+        memories=memory_dicts,
+        reddit_posts=reddit_posts
     )
     
     # Generate response
@@ -724,10 +741,20 @@ async def chat_stream(request: ChatRequest):
         for mr in retrieved_memories
     ]
     
+    # Fetch Reddit posts for current events context
+    reddit_posts = None
+    if settings.reddit_enabled:
+        try:
+            posts = await reddit_client.get_top_posts()
+            reddit_posts = [p.to_dict() for p in posts]
+        except Exception as e:
+            logger.warning(f"Failed to fetch Reddit posts: {e}")
+    
     messages = build_prompt_with_memories(
         user_message=request.message,
         conversation_history=history,
-        memories=memory_dicts
+        memories=memory_dicts,
+        reddit_posts=reddit_posts
     )
     
     async def generate():
