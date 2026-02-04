@@ -347,7 +347,6 @@ function ChatInput({ onSend, disabled }: ChatInputProps) {
           }}
           onKeyDown={handleKeyDown}
           placeholder="Share your thoughts..."
-          disabled={disabled}
           rows={1}
           className="flex-1 bg-transparent text-void-100 placeholder-void-500 resize-none outline-none text-[15px] leading-relaxed max-h-[200px]"
         />
