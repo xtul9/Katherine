@@ -21,6 +21,23 @@ from models import Message, MessageRole
 
 
 # =============================================================================
+# Datetime normalization
+# =============================================================================
+
+def _normalize_datetime(dt: datetime) -> datetime:
+    """Ensure datetime is timezone-aware (UTC). Naive datetimes are assumed to be UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _parse_datetime(date_str: str) -> datetime:
+    """Parse ISO datetime string and ensure it's timezone-aware (UTC)."""
+    dt = datetime.fromisoformat(date_str)
+    return _normalize_datetime(dt)
+
+
+# =============================================================================
 # Encryption utilities for internal monologue
 # =============================================================================
 
@@ -405,7 +422,7 @@ class ConversationStore:
                 id=row["id"],
                 role=MessageRole(row["role"]),
                 content=row["content"],
-                timestamp=datetime.fromisoformat(row["timestamp"]),
+                timestamp=_parse_datetime(row["timestamp"]),
                 internal_monologue=internal_monologue,
                 retrieved_memory_ids=retrieved_memory_ids
             ))
@@ -458,7 +475,7 @@ class ConversationStore:
                 id=row["id"],
                 role=MessageRole(row["role"]),
                 content=content,
-                timestamp=datetime.fromisoformat(row["timestamp"])
+                timestamp=_parse_datetime(row["timestamp"])
             )
     
     def get_message(self, message_id: str, include_monologue: bool = False) -> Optional[Message]:
@@ -486,7 +503,7 @@ class ConversationStore:
             id=row["id"],
             role=MessageRole(row["role"]),
             content=row["content"],
-            timestamp=datetime.fromisoformat(row["timestamp"]),
+            timestamp=_parse_datetime(row["timestamp"]),
             internal_monologue=internal_monologue,
             retrieved_memory_ids=retrieved_memory_ids
         )
@@ -532,7 +549,7 @@ class ConversationStore:
                     id=row["id"],
                     role=MessageRole(row["role"]),
                     content=row["content"],
-                    timestamp=datetime.fromisoformat(row["timestamp"])
+                    timestamp=_parse_datetime(row["timestamp"])
                 ),
                 "conversation_id": row["conversation_id"],
                 "conversation_title": row["conversation_title"]
@@ -574,7 +591,8 @@ class ConversationStore:
         self, 
         conversation_id: str,
         window_hours: Optional[int] = None,
-        min_messages: Optional[int] = None
+        min_messages: Optional[int] = None,
+        include_monologue: bool = False
     ) -> list[Message]:
         """
         Get messages within the active context window.
@@ -589,20 +607,21 @@ class ConversationStore:
             conversation_id: The conversation ID
             window_hours: Override the default window (settings.context_window_hours)
             min_messages: Override the minimum messages (settings.min_context_messages)
+            include_monologue: If True, decrypt and include internal monologue
         """
         hours = window_hours or settings.context_window_hours
         min_msgs = min_messages if min_messages is not None else settings.min_context_messages
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         
         # Get messages from time window
-        time_based_messages = self.get_messages(conversation_id, since=cutoff)
+        time_based_messages = self.get_messages(conversation_id, since=cutoff, include_monologue=include_monologue)
         
         # If we have enough messages from the time window, return them
         if len(time_based_messages) >= min_msgs:
             return time_based_messages
         
         # Otherwise, get the last N messages regardless of time
-        recent_messages = self.get_messages(conversation_id, limit=min_msgs)
+        recent_messages = self.get_messages(conversation_id, limit=min_msgs, include_monologue=include_monologue)
         
         # Merge: use recent_messages as base, add any newer time-based ones
         if not recent_messages:
@@ -660,7 +679,7 @@ class ConversationStore:
                 id=row["id"],
                 role=MessageRole(row["role"]),
                 content=row["content"],
-                timestamp=datetime.fromisoformat(row["timestamp"])
+                timestamp=_parse_datetime(row["timestamp"])
             ))
         
         return messages
@@ -701,7 +720,7 @@ class ConversationStore:
                     id=row["id"],
                     role=MessageRole(row["role"]),
                     content=row["content"],
-                    timestamp=datetime.fromisoformat(row["timestamp"])
+                    timestamp=_parse_datetime(row["timestamp"])
                 ),
                 "conversation_id": row["conversation_id"],
                 "conversation_title": row["conversation_title"]
@@ -865,7 +884,7 @@ class ConversationStore:
                     id=row["id"],
                     role=MessageRole(row["role"]),
                     content=row["content"],
-                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    timestamp=_parse_datetime(row["timestamp"]),
                     internal_monologue=internal_monologue,
                     retrieved_memory_ids=retrieved_memory_ids
                 ),

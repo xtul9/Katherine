@@ -2,7 +2,7 @@
  * Katherine Client - API Layer
  */
 
-import type { ChatRequest, ChatResponse, HealthStatus, Memory, MemorySearchResult, StreamEvent, Conversation, ConversationDetail, ContextWindowStats, ExpiredMessagesResponse, ArchivalStats, ArchivalResult, FullArchivalResult, AutoArchivalStatus } from './types'
+import type { ChatRequest, ChatResponse, HealthStatus, Memory, MemorySearchResult, StreamEvent, Conversation, ConversationDetail, ContextWindowStats, ExpiredMessagesResponse, ArchivalStats, ArchivalResult, FullArchivalResult, AutoArchivalStatus, SelfDevelopmentStatus } from './types'
 
 const API_BASE = '/api'
 
@@ -322,6 +322,24 @@ export const api = {
    */
   async disableAutoArchival(): Promise<AutoArchivalStatus & { status: string }> {
     return request('/archival/auto/disable', { method: 'POST' })
+  },
+
+  // =========================================================================
+  // Self-Development Tracking
+  // =========================================================================
+
+  /**
+   * Get self-development tracking status
+   */
+  async getSelfDevelopmentStatus(): Promise<SelfDevelopmentStatus> {
+    return request('/self-development/status')
+  },
+
+  /**
+   * Reset self-development tracker
+   */
+  async resetSelfDevelopment(): Promise<SelfDevelopmentStatus & { status: string }> {
+    return request('/self-development/reset', { method: 'POST' })
   },
 }
 

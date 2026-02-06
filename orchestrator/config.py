@@ -153,6 +153,15 @@ class Settings(BaseSettings):
     monologue_separator_closing_tag: str = "</internal_monologue>"
     # Max tokens for LLM output (increased to accommodate internal monologue)
     llm_max_tokens: int = 6500
+    
+    # Self-development tracking settings
+    # Enable tracking of self-development progress in internal monologue
+    self_dev_tracking_enabled: bool = True
+    # Number of recent assessments to analyze for trend detection
+    self_dev_window_size: int = 10
+    # Threshold of negative assessments (0.0-1.0) to trigger reflection prompt
+    # e.g., 0.6 means if 60%+ of recent assessments are negative, trigger reflection
+    self_dev_negative_threshold: float = 0.6
 
 
 settings = Settings()

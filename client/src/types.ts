@@ -129,3 +129,20 @@ export interface AutoArchivalStatus {
   pending_messages: number
   will_trigger: boolean
 }
+
+export interface SelfDevelopmentAssessment {
+  assessment: 'yes' | 'partial' | 'no' | 'unknown'
+  reason: string
+  timestamp: string
+}
+
+export interface SelfDevelopmentStatus {
+  enabled: boolean
+  window_size: number
+  current_assessments: number
+  negative_ratio: number
+  threshold: number
+  reflection_triggered: boolean
+  last_reflection_time: string | null
+  recent_assessments: SelfDevelopmentAssessment[]
+}

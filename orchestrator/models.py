@@ -1,7 +1,7 @@
 """
 Katherine Orchestrator - Data Models
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field
@@ -20,7 +20,7 @@ class Message(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     role: MessageRole
     content: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     
     # Internal monologue (only for assistant messages)
     # This is Katherine's private reflection on why she said what she said
@@ -41,7 +41,7 @@ class Memory(BaseModel):
     emotional_tone: Optional[str] = None
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     source_messages: list[str] = Field(default_factory=list)  # Message IDs
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     tags: list[str] = Field(default_factory=list)
     
     # Internal monologue from the assistant's response

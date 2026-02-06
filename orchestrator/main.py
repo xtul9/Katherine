@@ -29,6 +29,7 @@ from conversation_store import conversation_store
 from archiver import archiver
 from query_expansion import query_expander
 from reddit_client import reddit_client
+from self_development_tracker import self_dev_tracker
 
 
 def _extract_question(text: str) -> str:
@@ -437,9 +438,14 @@ async def chat(request: ChatRequest):
     # Get or create conversation
     conversation_id = request.conversation_id or str(uuid.uuid4())
     
+    # Capture timestamp for the incoming message NOW (before any processing)
+    # This ensures accurate time difference calculations
+    user_message_time = datetime.now(timezone.utc)
+    
     # Load ACTIVE messages (within context window) from SQLite
     # Only messages from the last N hours are included directly
-    conversation = conversation_store.get_active_messages(conversation_id)
+    # Include internal monologue so Katherine can continue her previous thoughts
+    conversation = conversation_store.get_active_messages(conversation_id, include_monologue=True)
     
     # Log the incoming message for debugging
     logger.info(f"Chat request - message: '{request.message[:100] if request.message else '(empty)'}...'")
@@ -540,7 +546,16 @@ async def chat(request: ChatRequest):
                 retrieved_memories = memory_results[:settings.retrieval_top_k]
     
     # Build conversation history for LLM
-    history = [{"role": m.role, "content": m.content} for m in conversation[-settings.conversation_window:]]
+    # Include internal_monologue so Katherine can continue her previous thoughts
+    history = [
+        {
+            "role": m.role, 
+            "content": m.content, 
+            "timestamp": m.timestamp,
+            "internal_monologue": m.internal_monologue  # Katherine's thoughts from that response
+        } 
+        for m in conversation[-settings.conversation_window:]
+    ]
     
     # Convert memories to dict format for prompt building
     memory_dicts = [
@@ -565,12 +580,19 @@ async def chat(request: ChatRequest):
         except Exception as e:
             logger.warning(f"Failed to fetch Reddit posts: {e}")
     
+    # Check if self-development reflection should be triggered
+    self_dev_reflection = None
+    if self_dev_tracker.should_trigger_reflection():
+        self_dev_reflection = self_dev_tracker.get_reflection_prompt()
+    
     # Build prompt with injected memories (RAG injection step)
     messages = build_prompt_with_memories(
         user_message=request.message,
         conversation_history=history,
         memories=memory_dicts,
-        reddit_posts=reddit_posts
+        reddit_posts=reddit_posts,
+        current_message_time=user_message_time,
+        self_dev_reflection=self_dev_reflection
     )
     
     # Generate response
@@ -583,12 +605,19 @@ async def chat(request: ChatRequest):
     # Parse response to separate public part from internal monologue
     public_response, internal_monologue = parse_response_with_monologue(raw_response)
     
+    # Record self-development assessment from internal monologue
+    self_dev_tracker.record_assessment(
+        internal_monologue=internal_monologue,
+        conversation_id=conversation_id
+    )
+    
     # Get memory IDs that influenced this response
     retrieved_memory_ids = [mr.memory.id for mr in retrieved_memories]
     
     # Store messages in SQLite (only save user message if not empty)
+    # Use the timestamp captured at the start of the request for accuracy
     if request.message:
-        user_msg = Message(role=MessageRole.USER, content=request.message)
+        user_msg = Message(role=MessageRole.USER, content=request.message, timestamp=user_message_time)
         conversation_store.add_message(conversation_id, user_msg)
     
     assistant_msg = Message(role=MessageRole.ASSISTANT, content=public_response)
@@ -622,8 +651,13 @@ async def chat_stream(request: ChatRequest):
     """
     conversation_id = request.conversation_id or str(uuid.uuid4())
     
+    # Capture timestamp for the incoming message NOW (before any processing)
+    # This ensures accurate time difference calculations
+    user_message_time = datetime.now(timezone.utc)
+    
     # Load ACTIVE messages (within context window) from SQLite
-    conversation = conversation_store.get_active_messages(conversation_id)
+    # Include internal monologue so Katherine can continue her previous thoughts
+    conversation = conversation_store.get_active_messages(conversation_id, include_monologue=True)
     
     # Log the incoming message for debugging
     logger.info(f"Stream request - message: '{request.message[:100] if request.message else '(empty)'}...'")
@@ -726,7 +760,16 @@ async def chat_stream(request: ChatRequest):
                 
                 retrieved_memories = memory_results[:settings.retrieval_top_k]
     
-    history = [{"role": m.role, "content": m.content} for m in conversation[-settings.conversation_window:]]
+    # Include internal_monologue so Katherine can continue her previous thoughts
+    history = [
+        {
+            "role": m.role, 
+            "content": m.content, 
+            "timestamp": m.timestamp,
+            "internal_monologue": m.internal_monologue  # Katherine's thoughts from that response
+        } 
+        for m in conversation[-settings.conversation_window:]
+    ]
     
     memory_dicts = [
         {
@@ -750,11 +793,18 @@ async def chat_stream(request: ChatRequest):
         except Exception as e:
             logger.warning(f"Failed to fetch Reddit posts: {e}")
     
+    # Check if self-development reflection should be triggered
+    self_dev_reflection = None
+    if self_dev_tracker.should_trigger_reflection():
+        self_dev_reflection = self_dev_tracker.get_reflection_prompt()
+    
     messages = build_prompt_with_memories(
         user_message=request.message,
         conversation_history=history,
         memories=memory_dicts,
-        reddit_posts=reddit_posts
+        reddit_posts=reddit_posts,
+        current_message_time=user_message_time,
+        self_dev_reflection=self_dev_reflection
     )
     
     async def generate():
@@ -795,12 +845,19 @@ async def chat_stream(request: ChatRequest):
         # Parse the full response to extract internal monologue
         public_response, internal_monologue = parse_response_with_monologue(full_response)
         
+        # Record self-development assessment from internal monologue
+        self_dev_tracker.record_assessment(
+            internal_monologue=internal_monologue,
+            conversation_id=conversation_id
+        )
+        
         # Get memory IDs that influenced this response
         retrieved_memory_ids = [mr.memory.id for mr in retrieved_memories]
         
         # Store in SQLite (only save user message if not empty)
+        # Use the timestamp captured at the start of the request for accuracy
         if request.message:
-            user_msg = Message(role=MessageRole.USER, content=request.message)
+            user_msg = Message(role=MessageRole.USER, content=request.message, timestamp=user_message_time)
             conversation_store.add_message(conversation_id, user_msg)
         
         assistant_msg = Message(role=MessageRole.ASSISTANT, content=public_response)
@@ -1227,6 +1284,36 @@ async def disable_auto_archival():
     return {
         "status": "disabled",
         **background_archiver.get_status()
+    }
+
+
+# === Self-Development Tracking ===
+
+@app.get("/self-development/status")
+async def get_self_development_status():
+    """
+    Get current self-development tracking status.
+    
+    Returns tracking statistics including:
+    - Current negative ratio
+    - Recent assessments
+    - Whether reflection is triggered
+    """
+    return self_dev_tracker.get_status()
+
+
+@app.post("/self-development/reset")
+async def reset_self_development_tracker():
+    """
+    Reset the self-development tracker.
+    
+    Clears all recorded assessments and resets the reflection trigger.
+    Useful for starting fresh or after significant prompt changes.
+    """
+    self_dev_tracker.reset()
+    return {
+        "status": "reset",
+        **self_dev_tracker.get_status()
     }
 
 

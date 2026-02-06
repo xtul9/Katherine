@@ -381,6 +381,202 @@ function ChatInput({ onSend, disabled }: ChatInputProps) {
 }
 
 // ============================================================================
+// Self-Development Indicator Component
+// ============================================================================
+
+function SelfDevelopmentIndicator() {
+  const [status, setStatus] = useState<{
+    enabled: boolean
+    negativeRatio: number
+    threshold: number
+    reflectionTriggered: boolean
+    currentAssessments: number
+    windowSize: number
+  } | null>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [isResetting, setIsResetting] = useState(false)
+
+  // Fetch status periodically
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        const data = await api.getSelfDevelopmentStatus()
+        setStatus({
+          enabled: data.enabled,
+          negativeRatio: data.negative_ratio,
+          threshold: data.threshold,
+          reflectionTriggered: data.reflection_triggered,
+          currentAssessments: data.current_assessments,
+          windowSize: data.window_size,
+        })
+      } catch {
+        // Silently fail - feature might be disabled
+      }
+    }
+
+    fetchStatus()
+    const interval = setInterval(fetchStatus, 10000) // Refresh every 10s
+    return () => clearInterval(interval)
+  }, [])
+
+  const handleReset = async () => {
+    setIsResetting(true)
+    try {
+      const data = await api.resetSelfDevelopment()
+      setStatus({
+        enabled: data.enabled,
+        negativeRatio: data.negative_ratio,
+        threshold: data.threshold,
+        reflectionTriggered: data.reflection_triggered,
+        currentAssessments: data.current_assessments,
+        windowSize: data.window_size,
+      })
+    } finally {
+      setIsResetting(false)
+    }
+  }
+
+  if (!status || !status.enabled) return null
+
+  // Calculate progress percentage (inverted - higher growth = more fill)
+  const growthRatio = 1 - status.negativeRatio
+  const progressPercent = Math.round(growthRatio * 100)
+  
+  // Determine color based on growth ratio
+  const getColor = () => {
+    if (status.reflectionTriggered) return 'text-amber-400'
+    if (growthRatio >= 0.7) return 'text-emerald-400'
+    if (growthRatio >= 0.4) return 'text-aether-400'
+    return 'text-amber-400'
+  }
+
+  const getBgColor = () => {
+    if (status.reflectionTriggered) return 'bg-amber-500'
+    if (growthRatio >= 0.7) return 'bg-emerald-500'
+    if (growthRatio >= 0.4) return 'bg-aether-500'
+    return 'bg-amber-500'
+  }
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className={clsx(
+          'flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-full border transition-colors',
+          status.reflectionTriggered
+            ? 'text-amber-400 bg-amber-950/50 border-amber-800/30 hover:bg-amber-900/50'
+            : 'text-void-400 bg-void-800/50 border-void-700/30 hover:bg-void-700/50'
+        )}
+        title="Śledzenie samorozwoju Katherine"
+      >
+        {/* Growth icon */}
+        <svg
+          className={clsx('w-3.5 h-3.5', getColor())}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"
+          />
+        </svg>
+        
+        {/* Mini progress bar */}
+        <div className="w-12 h-1.5 bg-void-700 rounded-full overflow-hidden">
+          <div
+            className={clsx('h-full rounded-full transition-all duration-500', getBgColor())}
+            style={{ width: `${progressPercent}%` }}
+          />
+        </div>
+        
+        <span className={getColor()}>{progressPercent}%</span>
+        
+        {status.reflectionTriggered && (
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+        )}
+        
+        <svg
+          className={clsx(
+            'w-3 h-3 transition-transform',
+            expanded && 'rotate-180'
+          )}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Expanded panel */}
+      {expanded && (
+        <div className="absolute bottom-full left-0 mb-2 w-72 bg-void-900 border border-void-700 rounded-xl shadow-xl p-4 space-y-3 animate-fade-in z-50">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-medium text-void-200">Samorozwój Katherine</h3>
+            <button
+              onClick={handleReset}
+              disabled={isResetting}
+              className="text-xs text-void-500 hover:text-void-300 transition-colors disabled:opacity-50"
+              title="Resetuj tracker"
+            >
+              {isResetting ? 'Resetuję...' : 'Reset'}
+            </button>
+          </div>
+          
+          {/* Progress bar with label */}
+          <div className="space-y-1.5">
+            <div className="flex justify-between text-xs">
+              <span className="text-void-500">Wskaźnik rozwoju</span>
+              <span className={getColor()}>{progressPercent}% wzrostu</span>
+            </div>
+            <div className="w-full h-2 bg-void-800 rounded-full overflow-hidden">
+              <div
+                className={clsx('h-full rounded-full transition-all duration-500', getBgColor())}
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Stats */}
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="bg-void-800/50 rounded-lg p-2">
+              <p className="text-void-500">Ocen</p>
+              <p className="text-void-200 font-medium">{status.currentAssessments}/{status.windowSize}</p>
+            </div>
+            <div className="bg-void-800/50 rounded-lg p-2">
+              <p className="text-void-500">Próg</p>
+              <p className="text-void-200 font-medium">{Math.round((1 - status.threshold) * 100)}% min</p>
+            </div>
+          </div>
+
+          {/* Status message */}
+          {status.reflectionTriggered ? (
+            <div className="text-xs bg-amber-950/30 border border-amber-800/30 rounded-lg p-2 text-amber-300">
+              <span className="font-medium">Refleksja aktywna</span> — Katherine otrzymuje zachętę do samorozwoju
+            </div>
+          ) : status.currentAssessments < 3 ? (
+            <div className="text-xs text-void-500">
+              Zbieranie danych... ({status.currentAssessments}/3 min. ocen)
+            </div>
+          ) : growthRatio >= 0.7 ? (
+            <div className="text-xs text-emerald-400">
+              Dobry trend rozwoju ✓
+            </div>
+          ) : (
+            <div className="text-xs text-void-400">
+              Monitoring w toku
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
 // Status Bar Component
 // ============================================================================
 
@@ -1049,8 +1245,9 @@ export default function App() {
 
       {/* Memory indicator & Input */}
       <footer className="px-6 pb-6 pt-2 space-y-3">
-        <div className="max-w-3xl mx-auto">
+        <div className="max-w-3xl mx-auto flex items-center gap-3">
           <MemoryIndicator />
+          <SelfDevelopmentIndicator />
         </div>
         <div className="max-w-3xl mx-auto">
           <ChatInput onSend={handleSend} disabled={isLoading || isThinking} />

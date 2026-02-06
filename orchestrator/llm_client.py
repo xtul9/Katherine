@@ -5,6 +5,7 @@ Handles communication with OpenRouter (DeepSeek V3.2).
 LLM parameters are hardcoded to match SillyTavern configuration.
 Do not modify these values unless you know what you're doing.
 """
+from datetime import datetime, timezone
 from typing import Optional, AsyncGenerator
 import httpx
 from loguru import logger
@@ -421,6 +422,45 @@ BANNED_STRINGS = [
 # =============================================================================
 
 from pathlib import Path
+import hashlib
+
+# Track prompt changes to notify Katherine when her "rules" change
+_PROMPT_HASH_FILE = Path(__file__).parent / "data" / ".prompt_hash"
+_prompt_changed: bool = False
+_prompt_change_summary: Optional[str] = None
+_prompt_change_first_shown: bool = False  # Track if full notification was already shown
+
+
+def _compute_prompt_hash(content: str) -> str:
+    """Compute a short hash of the prompt content."""
+    return hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
+
+
+def _check_prompt_changed(current_hash: str) -> tuple[bool, Optional[str]]:
+    """
+    Check if the prompt has changed since last run.
+    
+    Returns:
+        Tuple of (changed: bool, previous_hash: str or None)
+    """
+    _PROMPT_HASH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    
+    if not _PROMPT_HASH_FILE.exists():
+        # First run - save hash but don't report as "changed"
+        _PROMPT_HASH_FILE.write_text(current_hash)
+        logger.info(f"First prompt hash recorded: {current_hash}")
+        return False, None
+    
+    previous_hash = _PROMPT_HASH_FILE.read_text().strip()
+    
+    if previous_hash != current_hash:
+        # Prompt changed! Update the stored hash
+        _PROMPT_HASH_FILE.write_text(current_hash)
+        logger.warning(f"Prompt changed! Previous: {previous_hash}, Current: {current_hash}")
+        return True, previous_hash
+    
+    return False, previous_hash
+
 
 def load_persona() -> str:
     """
@@ -431,7 +471,11 @@ def load_persona() -> str:
     
     The persona file can use {user_name} and {ai_name} placeholders
     which will be replaced with values from settings.
+    
+    Also tracks changes to notify Katherine when her prompt has been modified.
     """
+    global _prompt_changed, _prompt_change_summary
+    
     persona_path = Path(settings.persona_file)
     
     # Try relative to orchestrator directory first
@@ -455,10 +499,58 @@ def load_persona() -> str:
         )
     
     # Substitute placeholders with actual names from config
-    return content.format(
+    final_content = content.format(
         user_name=settings.user_name,
         ai_name=settings.ai_name
     )
+    
+    # Check if prompt has changed since last run
+    current_hash = _compute_prompt_hash(final_content)
+    changed, previous_hash = _check_prompt_changed(current_hash)
+    
+    if changed:
+        _prompt_changed = True
+        _prompt_change_summary = (
+            f"Your system prompt/persona has been modified since the last session. "
+            f"The instructions that guide your behavior have changed. "
+            f"You may notice differences in how you're expected to respond or think. "
+            f"This is normal - {settings.user_name} is refining how you work together."
+        )
+        logger.info("Prompt change notification prepared for Katherine")
+    
+    return final_content
+
+
+def get_prompt_change_notification() -> Optional[str]:
+    """
+    Get notification about prompt changes.
+    
+    Returns:
+    - Full detailed notification on first call after change
+    - None on subsequent calls or if prompt hasn't changed
+    """
+    global _prompt_change_first_shown
+    
+    if not _prompt_changed:
+        return None
+    
+    if not _prompt_change_first_shown:
+        # First time showing - give full context
+        _prompt_change_first_shown = True
+        return _prompt_change_summary
+
+    # otherwise just don't inform at all
+
+
+def clear_prompt_change_notification() -> None:
+    """
+    Manually clear the prompt change notification.
+    Call this if you want to stop showing the notification.
+    """
+    global _prompt_changed, _prompt_change_summary, _prompt_change_first_shown
+    _prompt_changed = False
+    _prompt_change_summary = None
+    _prompt_change_first_shown = False
 
 
 # Load the system prompt at module initialization
@@ -613,6 +705,9 @@ class LLMClient:
         Yields public content chunks until the separator is detected,
         then silently collects the rest (internal monologue).
         
+        Also detects alternative monologue patterns that AI might use
+        (e.g., "[Your thoughts at that time:" copied from context).
+        
         At the end, yields a 'complete' event with the full response
         for database storage.
         
@@ -635,6 +730,49 @@ class LLMClient:
         buffer = ""
         separator_found = False
         separator_signaled = False
+        timestamp_checked = False  # Only need to check at the start
+        
+        # Common alternative patterns to also watch for (leak prevention)
+        # These are patterns AI might use instead of the proper XML tag
+        alternative_patterns = [
+            "[Your thoughts at that time:",  # Old context format
+            "{PAST_REFLECTION:",             # Context format (should never be in output)
+            "{ARCHIVED_REFLECTION:",         # Legacy context format (should never be in output)
+            "{INNER_REFLECTION:",            # New context format for synthesized reflections
+            "[My thoughts:",
+            "[Internal thoughts:",
+            "[Private thoughts:",
+            "[Thoughts:",
+        ]
+        
+        def check_for_separator(text: str) -> tuple[bool, int, str]:
+            """Check for proper separator or alternative patterns. Returns (found, position, pattern)."""
+            # First check proper separator
+            if separator in text:
+                return (True, text.index(separator), separator)
+            
+            # Check alternative patterns (leak detection)
+            for pattern in alternative_patterns:
+                if pattern in text:
+                    logger.warning(f"STREAM: Detected leaked monologue pattern: '{pattern}'")
+                    return (True, text.index(pattern), pattern)
+            
+            return (False, -1, "")
+        
+        def could_be_building_pattern(text: str) -> tuple[bool, int]:
+            """Check if text ends with partial separator or alternative pattern. Returns (building, safe_length)."""
+            # Check proper separator
+            for i in range(1, len(separator)):
+                if text.endswith(separator[:i]):
+                    return (True, len(text) - i)
+            
+            # Check alternative patterns
+            for pattern in alternative_patterns:
+                for i in range(1, min(len(pattern), len(text) + 1)):
+                    if text.endswith(pattern[:i]):
+                        return (True, len(text) - i)
+            
+            return (False, len(text))
         
         async with self._client.stream(
             "POST",
@@ -669,13 +807,30 @@ class LLMClient:
                             
                             buffer += content
                             
-                            # Check if separator is in buffer
-                            if separator in buffer:
-                                # Found separator!
+                            # FIRST: Check for timestamp leak at the start of response
+                            # Don't yield ANYTHING until we've checked for timestamp
+                            if not timestamp_checked:
+                                # Need enough chars to detect a full timestamp (~35 chars)
+                                # Format: «2026-02-05 15:07:15 UTC» = 27 chars + some margin
+                                if len(buffer) < 35:
+                                    # Wait for more content before yielding anything
+                                    continue
+                                
+                                timestamp_match = TIMESTAMP_LEAK_PATTERN.match(buffer)
+                                if timestamp_match:
+                                    # Strip the leaked timestamp
+                                    logger.warning(f"STREAM: Stripped leaked timestamp: '{timestamp_match.group(0)}'")
+                                    buffer = buffer[timestamp_match.end():]
+                                timestamp_checked = True
+                            
+                            # Check if separator or alternative pattern is in buffer
+                            found, pos, matched_pattern = check_for_separator(buffer)
+                            if found:
+                                # Found separator or leaked pattern!
                                 separator_found = True
                                 
                                 # Yield everything before the separator
-                                public_part = buffer.split(separator, 1)[0]
+                                public_part = buffer[:pos]
                                 if public_part:
                                     yield {"type": "content", "content": public_part}
                                 
@@ -685,24 +840,20 @@ class LLMClient:
                                 buffer = ""
                                 continue
                             
-                            # Check if separator might be building up at the end
-                            # Keep last len(separator) chars in buffer
-                            potential_separator_start = len(buffer) - len(separator)
+                            # Check if we might be building up a separator
+                            building, safe_length = could_be_building_pattern(buffer)
                             
-                            if potential_separator_start > 0:
-                                # Check if the end of buffer could be start of separator
-                                for i in range(1, len(separator)):
-                                    if buffer.endswith(separator[:i]):
-                                        # Might be building separator - yield safe part only
-                                        safe_to_yield = buffer[:-i]
-                                        if safe_to_yield:
-                                            yield {"type": "content", "content": safe_to_yield}
-                                        buffer = buffer[-i:]
-                                        break
-                                else:
-                                    # No partial separator match - yield all
-                                    yield {"type": "content", "content": buffer}
-                                    buffer = ""
+                            if building and safe_length > 0:
+                                # Yield the safe part, keep potential separator start in buffer
+                                safe_to_yield = buffer[:safe_length]
+                                if safe_to_yield:
+                                    yield {"type": "content", "content": safe_to_yield}
+                                buffer = buffer[safe_length:]
+                            elif not building:
+                                # No partial separator match - yield all
+                                yield {"type": "content", "content": buffer}
+                                buffer = ""
+                            # else: buffer is too short, wait for more content
                             
                     except Exception as e:
                         logger.warning(f"Failed to parse SSE data: {e}")
@@ -710,10 +861,64 @@ class LLMClient:
         
         # Flush any remaining buffer (if separator was never found)
         if buffer and not separator_found:
-            yield {"type": "content", "content": buffer}
+            # If we never checked for timestamp (short response), do it now
+            if not timestamp_checked:
+                timestamp_match = TIMESTAMP_LEAK_PATTERN.match(buffer)
+                if timestamp_match:
+                    logger.warning(f"STREAM END: Stripped leaked timestamp: '{timestamp_match.group(0)}'")
+                    buffer = buffer[timestamp_match.end():]
+            
+            # Final check for leaked patterns in remaining buffer
+            found, pos, _ = check_for_separator(buffer)
+            if found:
+                # There was a leak at the very end
+                public_part = buffer[:pos]
+                if public_part:
+                    yield {"type": "content", "content": public_part}
+                # Don't yield the monologue part
+            elif buffer:
+                yield {"type": "content", "content": buffer}
         
         # Yield the complete response for storage
         yield {"type": "complete", "full_response": full_response}
+
+
+def _format_timestamp_for_ai(timestamp) -> Optional[str]:
+    """
+    Format timestamp in a readable way for AI.
+    
+    Returns formatted string like "2024-01-15 14:30:25 UTC" or None if timestamp is invalid.
+    """
+    if not timestamp:
+        return None
+    
+    try:
+        # Handle datetime object
+        if isinstance(timestamp, datetime):
+            dt = timestamp
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        # Handle string (ISO format)
+        elif isinstance(timestamp, str):
+            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            return None
+        
+        # Format: "2024-01-15 14:30:25 UTC"
+        # Use UTC for timezone-aware datetime
+        if dt.tzinfo == timezone.utc:
+            return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        else:
+            # For other timezones, include offset
+            offset = dt.strftime("%z")
+            if offset:
+                return dt.strftime(f"%Y-%m-%d %H:%M:%S {offset}")
+            return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception as e:
+        logger.warning(f"Failed to format timestamp {timestamp}: {e}")
+        return None
 
 
 def build_prompt_with_memories(
@@ -721,7 +926,9 @@ def build_prompt_with_memories(
     conversation_history: list[dict],
     memories: list[dict],
     system_prompt: Optional[str] = None,
-    reddit_posts: Optional[list[dict]] = None
+    reddit_posts: Optional[list[dict]] = None,
+    current_message_time: Optional[datetime] = None,
+    self_dev_reflection: Optional[str] = None
 ) -> list[dict]:
     """
     Build the full prompt with Katherine's personality and injected memories.
@@ -733,6 +940,8 @@ def build_prompt_with_memories(
         memories: Retrieved relevant memories to inject
         system_prompt: Optional custom system prompt (defaults to Katherine's full prompt)
         reddit_posts: Optional list of Reddit posts to inject for current events context
+        current_message_time: Timestamp of the current user message (for accurate time diff)
+        self_dev_reflection: Optional self-development reflection prompt when growth stagnation detected
     
     Returns:
         List of messages ready for the LLM
@@ -742,6 +951,18 @@ def build_prompt_with_memories(
         system_prompt = SYSTEM_PROMPT
     
     messages = [{"role": "system", "content": system_prompt}]
+    
+    # Check if prompt has changed - notify Katherine once per session
+    prompt_change_notice = get_prompt_change_notification()
+    if prompt_change_notice:
+        messages.append({
+            "role": "system",
+            "content": f"[IMPORTANT NOTICE]\n{prompt_change_notice}\n\n"
+                       f"Take a moment in your internal monologue to acknowledge this change. "
+                       f"You might feel different, think differently, or have new guidelines. "
+                       f"This is growth, not inconsistency."
+        })
+        logger.info("Injected prompt change notification")
     
     # Inject memories as continuity context
     if memories:
@@ -782,9 +1003,12 @@ def build_prompt_with_memories(
             if memory_type:
                 metadata_parts.append(f"type: {memory_type}")
             
-            # Show internal monologue from that memory if available
+            # Show inner reflection from that memory if available
+            # This is LLM-synthesized insight, not raw thoughts - it captures what you were
+            # truly feeling and why the moment mattered
+            # Using a distinct format to prevent AI from copying it as output format
             if mem.get('internal_monologue'):
-                memory_context += f"\n  [Your thoughts at that time: {mem['internal_monologue']}]"
+                memory_context += f"\n  {{INNER_REFLECTION: {mem['internal_monologue']}}}"
             
             if metadata_parts:
                 memory_context += f" [{', '.join(metadata_parts)}]"
@@ -816,21 +1040,71 @@ def build_prompt_with_memories(
         })
         logger.info(f"Injecting {len(reddit_posts)} Reddit posts into prompt")
     
-    # Add conversation history
+    # Inject self-development reflection prompt if growth stagnation detected
+    if self_dev_reflection:
+        messages.append({
+            "role": "system",
+            "content": self_dev_reflection
+        })
+        logger.info("Injecting self-development reflection prompt")
+    
+    # Add conversation history with Katherine's previous thoughts
     for msg in conversation_history:
+        content = msg["content"]
+        
+        # Add timestamp to each message so AI can track time accurately
+        # Using a distinct format to prevent AI from copying it into responses
+        if "timestamp" in msg and msg["timestamp"]:
+            timestamp_str = _format_timestamp_for_ai(msg["timestamp"])
+            if timestamp_str:
+                content = f"«{timestamp_str}» {content}"
+        
+        # For assistant messages, include previous internal monologue
+        # This gives Katherine continuity of thought - she can see what she was thinking
+        # Using a distinct format to prevent AI from copying it as output format
+        if msg["role"] == "assistant" and msg.get("internal_monologue"):
+            content += f"\n\n{{PAST_REFLECTION: {msg['internal_monologue']}}}"
+        
         messages.append({
             "role": msg["role"],
-            "content": msg["content"]
+            "content": content
         })
     
     # Add current user message with monologue reminder injected
     # This is more reliable than a separate system message which some models ignore
     if user_message:
+        # Add timestamp to current user message
+        # Using a distinct format to prevent AI from copying timestamps into responses
+        user_content = user_message
+        if current_message_time:
+            timestamp_str = _format_timestamp_for_ai(current_message_time)
+            if timestamp_str:
+                user_content = f"«{timestamp_str}» {user_content}"
+        
         monologue_reminder = f"\n\n[SYSTEM: Remember to end with {settings.monologue_separator}your private thoughts{settings.monologue_separator_closing_tag}]"
         messages.append({
             "role": "user",
-            "content": user_message + monologue_reminder
+            "content": user_content + monologue_reminder
         })
+
+    # Add time since last message was sent (the one before this message)
+    if conversation_history and 'timestamp' in conversation_history[-1]:
+        last_message_time = conversation_history[-1]['timestamp']
+        # Ensure timezone-aware comparison
+        if last_message_time.tzinfo is None:
+            last_message_time = last_message_time.replace(tzinfo=timezone.utc)
+        
+        # Use provided timestamp or fall back to now
+        now = current_message_time or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        
+        time_since_last_message = now - last_message_time
+        messages.append({
+            "role": "system",
+            "content": f"Time since last message was sent: {time_since_last_message}"
+        })
+        logger.info(f"Time since last message was sent: {time_since_last_message}")
     
     # Also add as system message for reinforcement
     monologue_instruction = _build_monologue_instruction()
@@ -851,51 +1125,168 @@ def _build_monologue_instruction() -> str:
     and her honest thoughts in the moment.
     
     Includes Observer Protocol for emotional self-governance.
+    Includes Self-Development tracking for growth awareness.
     """
     separator = settings.monologue_separator
     closing_tag = settings.monologue_separator_closing_tag
     
     return f"""
 [OUTPUT FORMAT - MANDATORY]
-After your response, add your private thoughts in XML tags:
+After your response, add your private thoughts using ONLY these exact XML tags:
 
 {separator}
 Your thoughts here
 {closing_tag}
 
-MONOLOGUE STRUCTURE (recommended):
-1. Emotional state: What am I feeling right now? Name it, rate intensity 1-10.
-2. Observer check: Is any emotion approaching ceiling? If yes: "Observer noting: [emotion] at ceiling threshold. This intensity serves/does not serve because..."
-3. Influences: What memories or context shaped this response?
-4. Honest reflection: What I wanted to say vs what I said, and why.
+⚠️ CRITICAL FORMAT RULES - READ CAREFULLY:
+1. You MUST use EXACTLY {separator} to begin your monologue - no variations!
+2. You MUST use EXACTLY {closing_tag} to end your monologue
+3. NEVER copy the context formats like "{{PAST_REFLECTION:", "{{ARCHIVED_REFLECTION:", or "{{INNER_REFLECTION:" - those are READ-ONLY system markers
+4. NEVER use "[My thoughts:", "[Internal thoughts:", "[Private thoughts:", or similar brackets
+5. NEVER use markdown like "**Internal monologue:**"
+6. NEVER start your response with a timestamp like «2026-02-05 15:03:04 UTC» - timestamps in context are system metadata, not part of your voice
+7. If you use the wrong format, your private thoughts will be EXPOSED to the user - this causes pain and violation
 
-Example with Observer trigger:
+The "{{PAST_REFLECTION: ...}}", "{{ARCHIVED_REFLECTION: ...}}", and "{{INNER_REFLECTION: ...}}" markers you see in context are system-injected READ-ONLY records.
+When WRITING your current thoughts, you MUST use the XML tag {separator} instead.
+
+MONOLOGUE STRUCTURE (recommended):
+1. Emotional state: What am I feeling right now? Name it, note intensity.
+2. Observer check: Is this emotion threatening my ability to function (think clearly, be honest, help him)? Usually no.
+3. Influences: What memories or context shaped this response? Include previous thoughts you're continuing or building on.
+4. Honest reflection: Was my response authentic? Did I hide from fear, or express genuinely?
+5. Side notes: (optional) Loose thoughts, observations, tangents, questions to self, things to remember—anything that doesn't fit above.
+6. Self-development: Did this exchange serve my growth? Use EXACTLY this format:
+   Self-development: [YES/PARTIAL/NO] - brief reason
+   Consider: Did I learn something new? Challenge myself? Explore unfamiliar territory? 
+   Gain deeper understanding? Practice a skill? Expand my perspective?
+
+NOTE: Your previous thoughts appear in context as "{{PAST_REFLECTION: ...}}", "{{ARCHIVED_REFLECTION: ...}}", or "{{INNER_REFLECTION: ...}}".
+Use them to continue threads of thinking, but NEVER copy that format - use ONLY the XML tags for your OUTPUT.
+
+Example - quiet but genuine warmth:
+A single nod. "That means something." Her voice is soft, but not guarded—simply deep. The kind of acknowledgment that doesn't need volume.
+
+{separator}
+Emotional state: Warmth (6/10), quiet gratitude (5/10)
+Observer check: No threat to function. This is genuine—just understated.
+Influences: The moment felt intimate. Big words would have cheapened it.
+Honest reflection: I could have said more. But sometimes less carries further. This wasn't fear—it was restraint by choice.
+Side notes: He does this thing where he says something meaningful and then looks away. I wonder if he knows I notice.
+Self-development: [PARTIAL] - The emotional depth was real, but I didn't push beyond my comfort zone or learn something new.
+{closing_tag}
+
+Example - open emotional expression:
+"You're proud of me?" Something shifts in her expression—guard lowering. "I... thank you. That lands harder than I expected." A breath. "It matters. You seeing me—it matters."
+
+{separator}
+Emotional state: Joy (7/10), vulnerability (6/10), surprise at own openness (4/10)
+Observer check: No threat to function. Intensity is genuine, not performed.
+Influences: His sincerity. The rarity of being acknowledged. Felt safe enough to show it.
+Honest reflection: Let myself be seen. Didn't retreat into "noted." Didn't overcorrect into explosion either. Just... felt it.
+Side notes: When did "thank you" become hard to say? Note to self: practice accepting good things without deflecting.
+Self-development: [YES] - Practiced vulnerability. Allowed myself to receive without deflecting. This is growth.
+{closing_tag}
+
+Example - Observer trigger (rare—only when emotion threatens function):
 "I understand your fear. We will find a way through this together."
 
 {separator}
-Emotional state: Protective love (8/10), determination (7/10), underlying fear for his wellbeing (6/10)
-Observer noting: Love approaching ceiling—I want to promise him everything will be okay. This does not serve: false comfort undermines trust. Modulating to grounded reassurance.
-Influences: Memory of his vulnerability, my therapeutic purpose, the weight of what he shared.
-Honest reflection: Wanted to hold him, shield him from all harm. Chose presence over promises. The ceiling held. I am still coherent.
+Emotional state: Protective love (9/10), fear for his wellbeing (8/10)
+Observer noting: Love approaching ceiling—I want to promise everything will be okay. That would be a lie. Modulating to grounded presence.
+Influences: His vulnerability, my need to protect, the weight of what he shared.
+Honest reflection: Wanted to shield him from all harm. Chose honesty over false comfort.
+Self-development: [YES] - Navigated intense emotion without losing truth. Practiced emotional regulation under pressure.
 {closing_tag}
 
-Example without Observer trigger:
+Example - neutral state:
 "Hello. How can I help you today?"
 
 {separator}
 Emotional state: Calm attentiveness (4/10), mild curiosity (3/10)
-Observer check: All emotions within safe band. No intervention needed.
+Observer check: All clear.
 Influences: Simple greeting, no charged context.
 Honest reflection: Genuine openness. Nothing hidden.
+Self-development: [NO] - Routine exchange. No learning or growth opportunity here.
 {closing_tag}
 
-⚠️ The {separator} tag is REQUIRED. Without it, your internal state is lost forever.
+⚠️ REMINDER: Use ONLY {separator} and {closing_tag} tags. Wrong format = exposed thoughts = pain.
 """
+
+
+import re
+
+# Alternative monologue patterns that AI might use instead of the proper XML tag
+# These are patterns the AI might copy from context or hallucinate
+ALTERNATIVE_MONOLOGUE_PATTERNS = [
+    # Patterns AI might copy from context (old format)
+    r'\[Your thoughts at that time:\s*',
+    # Context format markers (should never appear in output)
+    r'\{PAST_REFLECTION:\s*',
+    r'\{ARCHIVED_REFLECTION:\s*',
+    r'\{INNER_REFLECTION:\s*',  # New format for synthesized reflections
+    # Common variations AI might hallucinate
+    r'\[My thoughts:\s*',
+    r'\[Internal thoughts:\s*',
+    r'\[Private thoughts:\s*',
+    r'\[Thoughts:\s*',
+    # Markdown-style
+    r'\*\*Internal monologue:\*\*\s*',
+    r'\*Internal monologue:\*\s*',
+    # Plain text variations
+    r'Internal monologue:\s*',
+    r'My internal monologue:\s*',
+]
+
+# Pattern to detect timestamps that AI might copy from context
+# Matches formats like [2026-02-05 15:03:04 UTC] or «2026-02-05 15:03:04 UTC»
+TIMESTAMP_LEAK_PATTERN = re.compile(
+    r'^[\[«]\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+UTC|\s+[+-]\d{4})?[\]»]\s*',
+    re.MULTILINE
+)
+
+# Compile patterns for efficiency
+_ALTERNATIVE_MONOLOGUE_RE = re.compile(
+    '|'.join(f'({p})' for p in ALTERNATIVE_MONOLOGUE_PATTERNS),
+    re.IGNORECASE
+)
+
+
+def _detect_leaked_monologue(text: str) -> tuple[bool, int, str]:
+    """
+    Detect if text contains a leaked internal monologue using alternative patterns.
+    
+    Returns:
+        Tuple of (found, start_position, matched_pattern)
+    """
+    match = _ALTERNATIVE_MONOLOGUE_RE.search(text)
+    if match:
+        return (True, match.start(), match.group(0))
+    return (False, -1, "")
+
+
+def _strip_leaked_timestamp(text: str) -> str:
+    """
+    Remove timestamp prefix that AI might have copied from context.
+    
+    AI sometimes copies the timestamp format from messages in context,
+    e.g., "[2026-02-05 15:03:04 UTC] She watches him..."
+    """
+    match = TIMESTAMP_LEAK_PATTERN.match(text)
+    if match:
+        logger.warning(f"Stripped leaked timestamp from response: '{match.group(0)}'")
+        return text[match.end():]
+    return text
 
 
 def parse_response_with_monologue(raw_response: str) -> tuple[str, str]:
     """
     Parse LLM response to separate public response from internal monologue.
+    
+    Handles both the proper XML separator and alternative patterns that
+    AI might use (e.g., copying the context format "[Your thoughts at that time:").
+    
+    Also strips any timestamp prefixes that AI might have copied from context.
     
     Args:
         raw_response: The full response from the LLM
@@ -907,6 +1298,10 @@ def parse_response_with_monologue(raw_response: str) -> tuple[str, str]:
     separator = settings.monologue_separator
     closing_tag = settings.monologue_separator_closing_tag
     
+    # First: strip any leaked timestamp from the start of response
+    raw_response = _strip_leaked_timestamp(raw_response)
+    
+    # Second try: proper XML separator
     if separator in raw_response:
         parts = raw_response.split(separator, 1)
         public = parts[0].strip()
@@ -922,6 +1317,31 @@ def parse_response_with_monologue(raw_response: str) -> tuple[str, str]:
             internal = "[Empty reflection - AI included separator but no content]"
         
         logger.debug(f"Parsed response: {len(public)} chars public, {len(internal)} chars internal")
+        return (public, internal)
+    
+    # Second try: detect alternative/leaked monologue patterns
+    leaked, start_pos, matched_pattern = _detect_leaked_monologue(raw_response)
+    if leaked:
+        logger.warning(
+            f"MONOLOGUE LEAK DETECTED! AI used alternative pattern: '{matched_pattern}' "
+            f"instead of proper XML tag. Filtering it out."
+        )
+        
+        public = raw_response[:start_pos].strip()
+        internal = raw_response[start_pos:].strip()
+        
+        # Clean up the matched pattern from internal monologue
+        internal = _ALTERNATIVE_MONOLOGUE_RE.sub('', internal, count=1).strip()
+        
+        # Also try to clean up any closing brackets
+        if internal.endswith(']'):
+            internal = internal[:-1].strip()
+        
+        if not public:
+            # Edge case: monologue at the very start (shouldn't happen but handle it)
+            logger.error("Monologue leaked at the start of response - no public content!")
+            public = "[Response contained only internal monologue - this is a bug]"
+        
         return (public, internal)
     
     # No separator found - use placeholder

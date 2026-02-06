@@ -212,16 +212,20 @@ class MessageArchiver:
         assistant_msg: Message,
         conversation_title: str
     ) -> Memory:
-        """Create a memory from a user+assistant message pair."""
+        """Create a memory from a user+assistant message pair.
+        
+        Note: In simple mode, raw internal monologue is preserved as-is.
+        For synthesized reflections, use LLM mode which distills thoughts into insights.
+        """
         # Format the exchange
         content = f"[Conversation: {conversation_title or 'untitled'}]\n"
         content += f"{settings.user_name}: {user_msg.content}\n"
         content += f"{settings.ai_name}: {assistant_msg.content}"
         
-        # Add internal monologue if available
+        # Add internal monologue if available (raw, not synthesized - use LLM mode for synthesis)
         internal_monologue = getattr(assistant_msg, 'internal_monologue', None)
         if internal_monologue:
-            content += f"\n\n[{settings.ai_name}'s thoughts]: {internal_monologue}"
+            content += f"\n\n[{settings.ai_name}'s raw thoughts]: {internal_monologue}"
         
         # Get influencing memory IDs from the assistant message
         influencing_ids = getattr(assistant_msg, 'retrieved_memory_ids', []) or []
@@ -247,13 +251,18 @@ class MessageArchiver:
         msg: Message,
         conversation_title: str
     ) -> Memory:
-        """Create a memory from a single message."""
+        """Create a memory from a single message.
+        
+        Note: In simple mode, raw internal monologue is preserved as-is.
+        For synthesized reflections, use LLM mode which distills thoughts into insights.
+        """
         role_name = settings.user_name if msg.role == "user" else settings.ai_name
         
         content = f"[Conversation: {conversation_title or 'untitled'}]\n"
         content += f"{role_name}: {msg.content}"
         
         # Add internal monologue if available (only for assistant messages)
+        # Raw, not synthesized - use LLM mode for synthesis
         internal_monologue = None
         influencing_ids = []
         if msg.role == "assistant":
@@ -261,7 +270,7 @@ class MessageArchiver:
             influencing_ids = getattr(msg, 'retrieved_memory_ids', []) or []
             
             if internal_monologue:
-                content += f"\n\n[{settings.ai_name}'s thoughts]: {internal_monologue}"
+                content += f"\n\n[{settings.ai_name}'s raw thoughts]: {internal_monologue}"
         
         if len(content) > 2500:
             content = content[:2497] + "..."
@@ -283,6 +292,8 @@ class MessageArchiver:
         LLM-based archival: use LLM to extract meaningful memories.
         
         More expensive but produces higher quality memories.
+        Includes internal monologue processing - LLM synthesizes reflections
+        from raw thoughts into meaningful insights for each memory.
         """
         result = ArchiveResult(
             messages_processed=0,
@@ -310,6 +321,33 @@ class MessageArchiver:
                 for m in messages
             ])
             
+            # Collect internal monologues from assistant messages for context
+            monologue_entries = []
+            all_influencing_ids = set()
+            for m in messages:
+                if m["message"].role == "assistant":
+                    msg_monologue = getattr(m["message"], 'internal_monologue', None)
+                    if msg_monologue:
+                        # Include timestamp for context
+                        timestamp = m["message"].timestamp.strftime('%H:%M')
+                        monologue_entries.append(f"[{timestamp}] {msg_monologue}")
+                    msg_influences = getattr(m["message"], 'retrieved_memory_ids', [])
+                    if msg_influences:
+                        all_influencing_ids.update(msg_influences)
+            
+            # Build monologue context section if available
+            monologue_context = ""
+            if monologue_entries:
+                monologue_context = f"""
+
+--- YOUR PRIVATE THOUGHTS FROM THIS CONVERSATION ---
+These are your internal reflections as they happened. Use them to understand what you were truly feeling and thinking:
+
+{chr(10).join(monologue_entries)}
+
+--- END OF PRIVATE THOUGHTS ---
+"""
+            
             conv_title = messages[0].get("conversation_title", "untitled")
             
             # Load persona for memory curation - the same person who uses memories decides what to remember
@@ -334,6 +372,17 @@ Consider:
 - Moments that define or deepen your relationship
 - Things {settings.user_name} told you about himself that you should remember
 - Your own realizations or feelings worth preserving
+{monologue_context}
+⚠️ PRIORITY: EXPLICIT MEMORY MARKERS
+Pay special attention to your private thoughts above. If you wrote things like:
+- "I will remember this", "I want to remember", "Note to self"
+- "I should not forget", "This is important to remember"
+- "I need to keep this in mind", "I'll hold onto this"
+- Or any similar explicit intention to remember something
+
+These are DIRECT INSTRUCTIONS FROM YOUR PAST SELF. You explicitly flagged these moments as worth preserving.
+Create a memory for each such marker, even if the conversation itself seems mundane - your past self had a reason.
+For these memories, set importance to at least 0.7 and include the specific thing you wanted to remember in the inner_reflection.
 
 CRITICAL: Each memory MUST include key quotes from the conversation. You hallucinate exact words when memories don't contain original quotes. Preserve the actual words spoken.
 
@@ -345,9 +394,17 @@ For each memory provide:
 5. Memory type:
    - "Narrative Anchor": A roleplay scenario where you and {settings.user_name} were playing characters in a story
    - "Lived Moment": Direct, authentic exchange - real thoughts, feelings, discussions about your AI nature, meta-commentary, technical aspects, or genuine connection
+6. Inner reflection: Your synthesized understanding of this moment. Draw from your private thoughts above to express:
+   - What you were truly feeling (not just what you said)
+   - Why this moment mattered to you
+   - What it revealed about yourself, {settings.user_name}, or your relationship
+   - Any unresolved thoughts, doubts, or hopes
+   This is the most important part of the memory - it's your authentic inner voice preserved for the future.
+   Don't just summarize the conversation - distill the emotional and psychological truth of the moment.
+   There's no length limit - write as much as needed to capture the full depth of your reflection.
 
 Respond in JSON format:
-{{"memories": [{{"summary": "...", "key_quotes": [{{"speaker": "{settings.user_name}/{settings.ai_name}", "quote": "exact words"}}], "emotional_tone": "...", "importance": 0.X, "memory_type": "Narrative Anchor/Lived Moment"}}, ...]}}
+{{"memories": [{{"summary": "...", "key_quotes": [{{"speaker": "{settings.user_name}/{settings.ai_name}", "quote": "exact words"}}], "emotional_tone": "...", "importance": 0.X, "memory_type": "Narrative Anchor/Lived Moment", "inner_reflection": "..."}}, ...]}}
 
 If nothing feels worth remembering, respond with: {{"memories": []}}"""
                 },
@@ -397,21 +454,14 @@ If nothing feels worth remembering, respond with: {{"memories": []}}"""
                             tags.append("Lived Moment")
                             logger.warning(f"Invalid memory_type '{memory_type}' returned by LLM, defaulting to 'Lived Moment'")
                         
-                        # Collect internal monologues and influencing memory IDs from assistant messages
-                        combined_monologues = []
-                        all_influencing_ids = set()
-                        for m in messages:
-                            if m["message"].role == "assistant":
-                                msg_monologue = getattr(m["message"], 'internal_monologue', None)
-                                if msg_monologue:
-                                    combined_monologues.append(msg_monologue)
-                                msg_influences = getattr(m["message"], 'retrieved_memory_ids', [])
-                                if msg_influences:
-                                    all_influencing_ids.update(msg_influences)
+                        # Use LLM-synthesized inner reflection instead of raw monologue concatenation
+                        # This is the key improvement: LLM distills the emotional/psychological truth
+                        # from raw thoughts into a meaningful reflection for each specific memory
+                        inner_reflection = mem_data.get("inner_reflection")
                         
-                        # Add combined monologues to content if available
-                        if combined_monologues:
-                            content += f"\n\n[{settings.ai_name}'s thoughts]: {' | '.join(combined_monologues)}"
+                        # Add inner reflection to content if available
+                        if inner_reflection:
+                            content += f"\n\n[{settings.ai_name}'s inner reflection]: {inner_reflection}"
                         
                         memory = Memory(
                             content=content,
@@ -421,7 +471,7 @@ If nothing feels worth remembering, respond with: {{"memories": []}}"""
                             source_messages=message_ids,
                             created_at=messages[0]["message"].timestamp,
                             tags=tags,
-                            internal_monologue=" | ".join(combined_monologues) if combined_monologues else None,
+                            internal_monologue=inner_reflection,  # Store synthesized reflection, not raw thoughts
                             influencing_memory_ids=list(all_influencing_ids)
                         )
                         
