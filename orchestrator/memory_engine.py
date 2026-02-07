@@ -980,6 +980,67 @@ class MemoryEngine:
         logger.info(f"Date search: {start_date.date()} to {end_date.date()} -> {len(filtered_memories)} results")
         
         return filtered_memories[:limit]
+    
+    def search_memories_special(
+        self,
+        special_criteria: str,
+        semantic_query: Optional[str] = None,
+        limit: int = 10
+    ) -> list[MemorySearchResult]:
+        """
+        Wyszukaj wspomnienia według specjalnych kryteriów.
+        
+        Args:
+            special_criteria: "oldest", "newest", "most_important", "most_emotional", etc.
+            semantic_query: Opcjonalne zapytanie semantyczne do filtrowania
+            limit: Maksymalna liczba wyników
+        
+        Returns:
+            Lista MemorySearchResult posortowana według kryteriów
+        """
+        if self._collection is None:
+            raise RuntimeError("Memory engine not initialized")
+        
+        # Najpierw wykonaj semantic search jeśli jest query
+        if semantic_query:
+            # Pobierz więcej kandydatów dla filtrowania
+            results, _, _ = self.search_memories(
+                query=semantic_query,
+                top_k=limit * 5,  # Pobierz więcej do filtrowania
+                use_hybrid=settings.use_hybrid_search
+            )
+            memories = [r.memory for r in results]
+        else:
+            # Pobierz wszystkie wspomnienia
+            memories = self.get_all_memories(limit=limit * 10)
+        
+        # Zastosuj specjalne kryteria sortowania
+        if special_criteria == "oldest":
+            memories.sort(key=lambda m: m.created_at)
+        elif special_criteria == "newest":
+            memories.sort(key=lambda m: m.created_at, reverse=True)
+        elif special_criteria == "most_important":
+            memories.sort(key=lambda m: m.importance, reverse=True)
+        elif special_criteria == "most_emotional":
+            # Sortuj po importance (emocjonalne wspomnienia mają wyższą importance)
+            # Można też dodać osobne pole emotional_intensity jeśli będzie dostępne
+            memories.sort(key=lambda m: m.importance, reverse=True)
+        elif special_criteria == "by_importance":
+            memories.sort(key=lambda m: m.importance, reverse=True)
+        elif special_criteria == "by_date":
+            memories.sort(key=lambda m: m.created_at, reverse=True)
+        else:
+            # Domyślnie sortuj po dacie (najnowsze)
+            memories.sort(key=lambda m: m.created_at, reverse=True)
+        
+        # Konwertuj na MemorySearchResult
+        results = [
+            MemorySearchResult(memory=m, similarity=1.0)
+            for m in memories[:limit]
+        ]
+        
+        logger.info(f"Special search ({special_criteria}): {len(results)} results")
+        return results
 
 
 # Singleton instance

@@ -96,6 +96,8 @@ class Settings(BaseSettings):
     # Query expansion settings
     # Enable LLM-based query expansion for better retrieval
     use_query_expansion: bool = True
+    # Enable persona-aware memory search (Katherine determines search criteria)
+    use_persona_aware_memory_search: bool = True
     # Model to use for query expansion (smaller/cheaper model recommended)
     query_expansion_model: str = "openai/gpt-4o-mini"
     

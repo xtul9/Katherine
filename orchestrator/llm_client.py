@@ -7,8 +7,10 @@ Do not modify these values unless you know what you're doing.
 """
 from datetime import datetime, timezone
 from typing import Optional, AsyncGenerator
+from dataclasses import dataclass
 import httpx
 from loguru import logger
+import json
 
 from config import settings
 
@@ -557,6 +559,234 @@ def clear_prompt_change_notification() -> None:
 SYSTEM_PROMPT = load_persona()
 
 
+@dataclass
+class MemorySearchCriteria:
+    """Kryteria wyszukiwania wspomnień określone przez Katherine."""
+    query_type: str  # "temporal", "special", "semantic", "combined"
+    semantic_query: Optional[str] = None  # Query dla semantic search
+    start_date: Optional[datetime] = None  # Dla temporal queries
+    end_date: Optional[datetime] = None  # Dla temporal queries
+    special_criteria: Optional[str] = None  # "oldest", "newest", "most_important", "most_emotional", etc.
+    sort_by: Optional[str] = None  # "date", "importance", "relevance"
+    limit: Optional[int] = None  # Może być różny dla różnych typów zapytań
+
+
+async def generate_memory_search_criteria(
+    recent_messages: list[dict],
+    conversation_history: list[dict],
+    llm_client_instance=None
+) -> MemorySearchCriteria:
+    """
+    Zapytaj Katherine (z pełną personą) jakie kryteria wyszukiwania wspomnień
+    powinny być użyte na podstawie ostatnich wiadomości.
+    
+    Priorytetyzuje najnowszą wiadomość, ale bierze pod uwagę kontekst ostatnich kilku.
+    
+    Args:
+        recent_messages: Ostatnie 3-5 wiadomości (najnowsza pierwsza)
+        conversation_history: Pełna historia rozmowy dla kontekstu
+        llm_client_instance: LLM client instance (defaults to global llm_client)
+    
+    Returns:
+        MemorySearchCriteria z określonymi kryteriami wyszukiwania
+    """
+    # Użyj przekazanego instancji lub globalnego llm_client
+    # (globalny jest zdefiniowany na końcu pliku, więc użyjemy go przez forward reference)
+    if llm_client_instance is None:
+        # Użyj globalnego llm_client - będzie dostępny w runtime
+        # (zdefiniowany na końcu pliku jako singleton)
+        pass  # Będziemy używać globalnego llm_client bezpośrednio
+    
+    # Przygotuj kontekst ostatnich wiadomości (priorytetyzuj najnowszą)
+    messages_context = []
+    for i, msg in enumerate(recent_messages[:5]):  # Max 5 ostatnich
+        priority = "HIGHEST" if i == 0 else "HIGH" if i < 2 else "MEDIUM"
+        messages_context.append(
+            f"[{priority} PRIORITY] {msg['role'].upper()}: {msg['content'][:300]}"
+        )
+    
+    context_text = "\n".join(messages_context)
+    
+    # Pobierz aktualną datę dla temporal queries
+    now = datetime.now(timezone.utc)
+    today_str = now.strftime("%Y-%m-%d")
+    
+    # Zbuduj prompt dla Katherine
+    messages = [
+        {
+            "role": "system",
+            "content": f"""{SYSTEM_PROMPT}
+
+--- MEMORY SEARCH CRITERIA TASK ---
+
+You need to determine what memories to search for based on the recent conversation. 
+Analyze the messages below and determine the search criteria.
+
+Recent messages (newest first, priority indicated):
+{context_text}
+
+Your task:
+1. Analyze what the user is asking about or what context is needed
+2. Determine the type of search needed
+3. Extract any temporal information (dates, time periods)
+4. Identify any special search criteria (oldest, newest, most important, etc.)
+5. Generate semantic query terms if needed
+
+Search types:
+- "temporal": User asks about a specific time period (yesterday, last week, etc.)
+- "special": User asks for specific criteria (oldest memory, most important, most emotional)
+- "semantic": Standard semantic search based on topics/concepts
+- "combined": Mix of temporal + semantic or special + semantic
+
+Special criteria you can detect:
+- "oldest": "najstarsze wspomnienie", "first memory", "earliest"
+- "newest": "najnowsze wspomnienie", "latest memory", "most recent"
+- "most_important": "najważniejsze", "most important", "highest importance"
+- "most_emotional": "najbardziej emocjonalne", "most emotional", "deepest feelings"
+- "by_importance": Sort by importance score
+- "by_date": Sort by date
+
+Temporal expressions to detect (in Polish or English):
+- "wczoraj"/"yesterday" -> yesterday
+- "przedwczoraj"/"day before yesterday" -> 2 days ago
+- "tydzień temu"/"week ago" -> 7 days ago
+- "w zeszłym tygodniu"/"last week" -> last week (Mon-Sun)
+- "w zeszłym miesiącu"/"last month" -> last month
+- "X dni temu"/"X days ago" -> X days ago
+- "dzisiaj"/"today" -> today
+
+Today's date: {today_str}
+
+Return your analysis as JSON:
+{{
+    "query_type": "temporal|special|semantic|combined",
+    "semantic_query": "key terms for semantic search (if needed)",
+    "temporal": {{
+        "start_date": "YYYY-MM-DD" or null,
+        "end_date": "YYYY-MM-DD" or null,
+        "description": "human-readable description of the time period"
+    }},
+    "special_criteria": "oldest|newest|most_important|most_emotional|by_importance|by_date" or null,
+    "sort_by": "date|importance|relevance" or null,
+    "reasoning": "brief explanation of your analysis"
+}}
+
+IMPORTANT:
+- Be precise with dates - use ISO format (YYYY-MM-DD)
+- For temporal queries, calculate dates relative to today ({today_str})
+- If user asks "co było wczoraj", start_date and end_date should both be yesterday
+- For "last week", calculate the Monday-Sunday range of the previous week
+- Include semantic query even for temporal/special searches if there's a topic filter
+- Return ONLY valid JSON, no other text"""
+        },
+        {
+            "role": "user",
+            "content": f"Analyze these messages and determine memory search criteria:\n\n{context_text}"
+        }
+    ]
+    
+    # Użyj przekazanej instancji lub globalnego llm_client
+    client_to_use = llm_client_instance
+    
+    try:
+        # Jeśli nie ma przekazanej instancji, użyjemy globalnego llm_client
+        # (będzie dostępny w runtime, nawet jeśli nie jest jeszcze zdefiniowany w tym momencie)
+        if client_to_use is None:
+            # Forward reference - llm_client jest zdefiniowany na końcu pliku
+            # W runtime będzie dostępny
+            import sys
+            current_module = sys.modules[__name__]
+            client_to_use = getattr(current_module, 'llm_client', None)
+        
+        if client_to_use is None:
+            raise RuntimeError("llm_client not available - make sure it's initialized")
+        
+        logger.debug("Asking Katherine to determine memory search criteria...")
+        
+        # Użyj niższej temperatury dla bardziej precyzyjnych zapytań
+        response = await client_to_use.chat_completion_with_params(
+            messages,
+            temperature=0.3,  # Niska temperatura dla precyzji
+            max_tokens=500
+        )
+        
+        logger.debug(f"Katherine's raw response for search criteria: {response[:500]}...")
+        
+        # Parsuj JSON response
+        start = response.find("{")
+        end = response.rfind("}") + 1
+        if start >= 0 and end > start:
+            data = json.loads(response[start:end])
+            logger.debug(f"Parsed search criteria JSON: {json.dumps(data, indent=2, default=str)}")
+            
+            # Konwertuj daty z stringów na datetime
+            start_date = None
+            end_date = None
+            if data.get("temporal"):
+                temporal = data["temporal"]
+                if temporal.get("start_date"):
+                    try:
+                        start_date = datetime.fromisoformat(temporal["start_date"]).replace(tzinfo=timezone.utc)
+                    except:
+                        pass
+                if temporal.get("end_date"):
+                    try:
+                        end_date = datetime.fromisoformat(temporal["end_date"]).replace(tzinfo=timezone.utc)
+                    except:
+                        pass
+            
+            criteria = MemorySearchCriteria(
+                query_type=data.get("query_type", "semantic"),
+                semantic_query=data.get("semantic_query"),
+                start_date=start_date,
+                end_date=end_date,
+                special_criteria=data.get("special_criteria"),
+                sort_by=data.get("sort_by", "relevance")
+            )
+            
+            # Szczegółowe logowanie kryteriów wyszukiwania skonstruowanych przez Katherine
+            logger.info("=" * 80)
+            logger.info("KATHERINE'S MEMORY SEARCH CRITERIA")
+            logger.info("=" * 80)
+            logger.info(f"Query Type: {criteria.query_type}")
+            logger.info(f"Semantic Query: '{criteria.semantic_query}'" if criteria.semantic_query else "Semantic Query: None")
+            
+            if criteria.query_type == "temporal" or criteria.query_type == "combined":
+                if criteria.start_date and criteria.end_date:
+                    logger.info(f"Temporal Range: {criteria.start_date.date()} to {criteria.end_date.date()}")
+                else:
+                    logger.warning("Temporal query type but missing dates!")
+            
+            if criteria.query_type == "special" or criteria.query_type == "combined":
+                if criteria.special_criteria:
+                    logger.info(f"Special Criteria: {criteria.special_criteria}")
+                else:
+                    logger.warning("Special query type but missing special_criteria!")
+            
+            logger.info(f"Sort By: {criteria.sort_by}")
+            if data.get("reasoning"):
+                logger.info(f"Katherine's Reasoning: {data.get('reasoning')}")
+            logger.info("=" * 80)
+            
+            return criteria
+            
+    except Exception as e:
+        logger.warning(f"Failed to generate persona-aware search criteria: {e}")
+        # Fallback: zwróć podstawowe semantic search
+        return MemorySearchCriteria(
+            query_type="semantic",
+            semantic_query=recent_messages[0]["content"] if recent_messages else "",
+            sort_by="relevance"
+        )
+    
+    # Fallback jeśli parsowanie się nie powiodło
+    return MemorySearchCriteria(
+        query_type="semantic",
+        semantic_query=recent_messages[0]["content"] if recent_messages else "",
+        sort_by="relevance"
+    )
+
+
 class LLMClient:
     """
     Client for communicating with OpenRouter's API (OpenAI-compatible).
@@ -651,6 +881,58 @@ class LLMClient:
             return self._stream_completion(payload)
         else:
             return await self._sync_completion(payload)
+    
+    async def chat_completion_with_params(
+        self,
+        messages: list[dict],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **kwargs
+    ) -> str:
+        """
+        Send a chat completion request with custom parameters.
+        
+        This is for special cases like query expansion where we need
+        different temperature or token limits than the default chat.
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            temperature: Override temperature (defaults to LLM_PARAMS value)
+            max_tokens: Override max_tokens (defaults to LLM_PARAMS value)
+            **kwargs: Additional parameters to override
+        
+        Returns:
+            Complete response text
+        """
+        if not self._client:
+            raise RuntimeError("LLM client not initialized")
+        
+        if not settings.openrouter_api_key:
+            raise RuntimeError("OpenRouter API key not configured")
+        
+        # Build payload with overridable parameters
+        payload = {
+            "model": settings.openrouter_model,
+            "messages": messages,
+            "stream": False,
+            
+            # Use provided values or fall back to defaults
+            "max_tokens": max_tokens if max_tokens is not None else LLM_PARAMS["max_tokens"],
+            "temperature": temperature if temperature is not None else LLM_PARAMS["temperature"],
+            "top_p": kwargs.get("top_p", LLM_PARAMS["top_p"]),
+            "top_k": kwargs.get("top_k", LLM_PARAMS["top_k"]),
+            "min_p": kwargs.get("min_p", LLM_PARAMS["min_p"]),
+            "repetition_penalty": kwargs.get("repetition_penalty", LLM_PARAMS["repetition_penalty"]),
+            "frequency_penalty": kwargs.get("frequency_penalty", LLM_PARAMS["frequency_penalty"]),
+            "presence_penalty": kwargs.get("presence_penalty", LLM_PARAMS["presence_penalty"]),
+        }
+        
+        # Don't use banned strings for query expansion/search criteria
+        # (they're meant for chat responses, not structured outputs)
+        if kwargs.get("use_banned_strings", False):
+            payload["stop"] = BANNED_STRINGS
+        
+        return await self._sync_completion(payload)
     
     async def _sync_completion(self, payload: dict) -> str:
         """Non-streaming completion."""

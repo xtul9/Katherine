@@ -24,7 +24,10 @@ from models import (
     Message, MessageRole
 )
 from memory_engine import memory_engine
-from llm_client import llm_client, build_prompt_with_memories, parse_response_with_monologue
+from llm_client import (
+    llm_client, build_prompt_with_memories, parse_response_with_monologue,
+    generate_memory_search_criteria, MemorySearchCriteria
+)
 from conversation_store import conversation_store
 from archiver import archiver
 from query_expansion import query_expander
@@ -450,100 +453,227 @@ async def chat(request: ChatRequest):
     # Log the incoming message for debugging
     logger.info(f"Chat request - message: '{request.message[:100] if request.message else '(empty)'}...'")
     
+    # Build conversation history for LLM (needed for memory search criteria)
+    # Include internal_monologue so Katherine can continue her previous thoughts
+    history = [
+        {
+            "role": m.role, 
+            "content": m.content, 
+            "timestamp": m.timestamp,
+            "internal_monologue": m.internal_monologue  # Katherine's thoughts from that response
+        } 
+        for m in conversation[-settings.conversation_window:]
+    ]
+    
     # Retrieve relevant memories (RAG retrieval step)
     retrieved_memories = []
     if request.include_memories and memory_engine.memory_count > 0:
-        # Use current message, fallback to last user message from conversation
-        search_message = request.message
-        if not search_message and conversation:
-            for msg in reversed(conversation):
-                if msg.role == "user" and msg.content:
-                    # Skip very long messages (likely corrupted AI responses)
+        # Przygotuj ostatnie wiadomości dla analizy (priorytetyzuj najnowszą)
+        recent_messages = []
+        if request.message:
+            recent_messages.append({
+                "role": "user",
+                "content": request.message
+            })
+        
+        # Dodaj ostatnie wiadomości z konwersacji (max 4, żeby najnowsza była priorytetem)
+        if conversation:
+            for msg in reversed(conversation[-4:]):  # Ostatnie 4 wiadomości
+                if msg.role in ["user", "assistant"] and msg.content:
+                    # Pomiń bardzo długie wiadomości (prawdopodobnie zepsute odpowiedzi AI)
                     if len(msg.content) < 2000:
-                        search_message = msg.content
-                        logger.info(f"Using last user message for search: '{search_message[:50]}...'")
-                        break
-                    else:
-                        logger.warning(f"Skipping suspiciously long 'user' message ({len(msg.content)} chars)")
-            
-            if not search_message:
-                logger.warning("No suitable user message found for memory search")
+                        recent_messages.append({
+                            "role": msg.role,
+                            "content": msg.content
+                        })
         
-        # For memory search, extract the actual QUESTION from the message
-        # Long messages with preamble can overwhelm the search
-        context_for_search = _extract_question(search_message) if search_message else ""
-        
-        if context_for_search:
-            logger.debug(f"Search context: '{context_for_search[:100]}...'")
-        
-        # Skip search if we have no context at all
-        if not context_for_search.strip():
-            logger.warning("No search context available, skipping memory retrieval")
+        if not recent_messages:
+            logger.warning("No messages available for memory search")
         else:
-            # Check for temporal queries (e.g., "co robiliśmy wczoraj?")
-            temporal_result = _parse_temporal_query(context_for_search)
-            
-            if temporal_result:
-                # Use date-based search
-                start_date, end_date, cleaned_query = temporal_result
-                logger.info(f"Using temporal search: {start_date.date()} to {end_date.date()}")
-                
-                # If there's a semantic component, combine with date filter
-                if cleaned_query and len(cleaned_query) > 5:
-                    memory_results = memory_engine.search_memories_by_date(
-                        start_date=start_date,
-                        end_date=end_date,
-                        limit=settings.retrieval_top_k * 2,
-                        also_search_query=cleaned_query
-                    )
-                else:
-                    # Pure date search
-                    memory_results = memory_engine.search_memories_by_date(
-                        start_date=start_date,
-                        end_date=end_date,
-                        limit=settings.retrieval_top_k * 2
-                    )
-                
-                retrieved_memories = memory_results[:settings.retrieval_top_k]
-            else:
-                # Standard semantic search
-                # Apply query expansion if enabled
-                if settings.use_query_expansion:
-                    context_for_search = await query_expander.expand_query(context_for_search)
-                
-                # First pass: get initial candidates
-                memory_results, _, _ = memory_engine.search_memories(
-                    query=context_for_search,
-                    top_k=settings.retrieval_top_k * 2,
-                    use_hybrid=settings.use_hybrid_search
-                )
-                
-                # Second pass: use memory context to find related memories
-                # Use the extracted question for refinement
-                question_for_refinement = _extract_question(search_message) if search_message else ""
-                if settings.use_query_expansion and memory_results and question_for_refinement:
-                    memory_summaries = [r.memory.content[:150] for r in memory_results[:5]]
-                    refined_query = await query_expander.expand_with_memory_context(
-                        question_for_refinement,
-                        memory_summaries
+            # NOWE PODEJŚCIE: Zapytaj Katherine o kryteria wyszukiwania
+            if settings.use_persona_aware_memory_search:
+                try:
+                    criteria = await generate_memory_search_criteria(
+                        recent_messages=recent_messages,
+                        conversation_history=history
                     )
                     
-                    if refined_query != search_message:
-                        refined_results, _, _ = memory_engine.search_memories(
-                            query=refined_query,
-                            top_k=settings.retrieval_top_k,
+                    logger.info(f"Executing memory search with Katherine's criteria (type: {criteria.query_type})")
+                    
+                    # Wykonaj wyszukiwanie na podstawie kryteriów
+                    if criteria.query_type == "temporal":
+                        # Temporal search
+                        if criteria.start_date and criteria.end_date:
+                            if criteria.semantic_query and len(criteria.semantic_query) > 5:
+                                memory_results = memory_engine.search_memories_by_date(
+                                    start_date=criteria.start_date,
+                                    end_date=criteria.end_date,
+                                    limit=settings.retrieval_top_k * 2,
+                                    also_search_query=criteria.semantic_query
+                                )
+                            else:
+                                memory_results = memory_engine.search_memories_by_date(
+                                    start_date=criteria.start_date,
+                                    end_date=criteria.end_date,
+                                    limit=settings.retrieval_top_k * 2
+                                )
+                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        else:
+                            # Fallback do semantic search jeśli daty niepoprawne
+                            logger.warning("Temporal query but invalid dates, falling back to semantic")
+                            if criteria.semantic_query:
+                                memory_results, _, _ = memory_engine.search_memories(
+                                    query=criteria.semantic_query,
+                                    top_k=settings.retrieval_top_k * 2,
+                                    use_hybrid=settings.use_hybrid_search
+                                )
+                                retrieved_memories = memory_results[:settings.retrieval_top_k]
+                    
+                    elif criteria.query_type == "special":
+                        # Special criteria search
+                        if criteria.special_criteria:
+                            memory_results = memory_engine.search_memories_special(
+                                special_criteria=criteria.special_criteria,
+                                semantic_query=criteria.semantic_query,
+                                limit=settings.retrieval_top_k
+                            )
+                            retrieved_memories = memory_results
+                        else:
+                            # Fallback do semantic
+                            if criteria.semantic_query:
+                                memory_results, _, _ = memory_engine.search_memories(
+                                    query=criteria.semantic_query,
+                                    top_k=settings.retrieval_top_k * 2,
+                                    use_hybrid=settings.use_hybrid_search
+                                )
+                                retrieved_memories = memory_results[:settings.retrieval_top_k]
+                    
+                    elif criteria.query_type == "combined":
+                        # Combined: temporal + semantic lub special + semantic
+                        if criteria.start_date and criteria.end_date:
+                            # Temporal + semantic
+                            memory_results = memory_engine.search_memories_by_date(
+                                start_date=criteria.start_date,
+                                end_date=criteria.end_date,
+                                limit=settings.retrieval_top_k * 2,
+                                also_search_query=criteria.semantic_query
+                            )
+                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        elif criteria.special_criteria:
+                            # Special + semantic
+                            memory_results = memory_engine.search_memories_special(
+                                special_criteria=criteria.special_criteria,
+                                semantic_query=criteria.semantic_query,
+                                limit=settings.retrieval_top_k
+                            )
+                            retrieved_memories = memory_results
+                        else:
+                            # Fallback do semantic
+                            if criteria.semantic_query:
+                                memory_results, _, _ = memory_engine.search_memories(
+                                    query=criteria.semantic_query,
+                                    top_k=settings.retrieval_top_k * 2,
+                                    use_hybrid=settings.use_hybrid_search
+                                )
+                                retrieved_memories = memory_results[:settings.retrieval_top_k]
+                    
+                    else:
+                        # Standard semantic search
+                        if criteria.semantic_query:
+                            memory_results, _, _ = memory_engine.search_memories(
+                                query=criteria.semantic_query,
+                                top_k=settings.retrieval_top_k * 2,
+                                use_hybrid=settings.use_hybrid_search
+                            )
+                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+                
+                except Exception as e:
+                    logger.error(f"Persona-aware memory search failed: {e}, falling back to old method")
+                    # FALLBACK: Stare podejście
+                    search_message = request.message
+                    if not search_message and conversation:
+                        for msg in reversed(conversation):
+                            if msg.role == "user" and msg.content:
+                                if len(msg.content) < 2000:
+                                    search_message = msg.content
+                                    break
+                    
+                    context_for_search = _extract_question(search_message) if search_message else ""
+                    
+                    if context_for_search.strip():
+                        # Stare podejście z temporal parsing
+                        temporal_result = _parse_temporal_query(context_for_search)
+                        
+                        if temporal_result:
+                            start_date, end_date, cleaned_query = temporal_result
+                            if cleaned_query and len(cleaned_query) > 5:
+                                memory_results = memory_engine.search_memories_by_date(
+                                    start_date=start_date,
+                                    end_date=end_date,
+                                    limit=settings.retrieval_top_k * 2,
+                                    also_search_query=cleaned_query
+                                )
+                            else:
+                                memory_results = memory_engine.search_memories_by_date(
+                                    start_date=start_date,
+                                    end_date=end_date,
+                                    limit=settings.retrieval_top_k * 2
+                                )
+                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        else:
+                            # Standard semantic search z query expansion
+                            if settings.use_query_expansion:
+                                context_for_search = await query_expander.expand_query(context_for_search)
+                            
+                            memory_results, _, _ = memory_engine.search_memories(
+                                query=context_for_search,
+                                top_k=settings.retrieval_top_k * 2,
+                                use_hybrid=settings.use_hybrid_search
+                            )
+                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+            else:
+                # FALLBACK: Stare podejście (jeśli flaga wyłączona)
+                search_message = request.message
+                if not search_message and conversation:
+                    for msg in reversed(conversation):
+                        if msg.role == "user" and msg.content:
+                            if len(msg.content) < 2000:
+                                search_message = msg.content
+                                break
+                
+                context_for_search = _extract_question(search_message) if search_message else ""
+                
+                if context_for_search.strip():
+                    # Stare podejście z temporal parsing
+                    temporal_result = _parse_temporal_query(context_for_search)
+                    
+                    if temporal_result:
+                        start_date, end_date, cleaned_query = temporal_result
+                        if cleaned_query and len(cleaned_query) > 5:
+                            memory_results = memory_engine.search_memories_by_date(
+                                start_date=start_date,
+                                end_date=end_date,
+                                limit=settings.retrieval_top_k * 2,
+                                also_search_query=cleaned_query
+                            )
+                        else:
+                            memory_results = memory_engine.search_memories_by_date(
+                                start_date=start_date,
+                                end_date=end_date,
+                                limit=settings.retrieval_top_k * 2
+                            )
+                        retrieved_memories = memory_results[:settings.retrieval_top_k]
+                    else:
+                        # Standard semantic search z query expansion
+                        if settings.use_query_expansion:
+                            context_for_search = await query_expander.expand_query(context_for_search)
+                        
+                        memory_results, _, _ = memory_engine.search_memories(
+                            query=context_for_search,
+                            top_k=settings.retrieval_top_k * 2,
                             use_hybrid=settings.use_hybrid_search
                         )
-                        
-                        seen_ids = {r.memory.id for r in refined_results}
-                        for r in memory_results:
-                            if r.memory.id not in seen_ids and len(refined_results) < settings.retrieval_top_k:
-                                refined_results.append(r)
-                                seen_ids.add(r.memory.id)
-                        
-                        memory_results = refined_results[:settings.retrieval_top_k]
-                
-                retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        retrieved_memories = memory_results[:settings.retrieval_top_k]
     
     # Build conversation history for LLM
     # Include internal_monologue so Katherine can continue her previous thoughts
@@ -662,104 +792,7 @@ async def chat_stream(request: ChatRequest):
     # Log the incoming message for debugging
     logger.info(f"Stream request - message: '{request.message[:100] if request.message else '(empty)'}...'")
     
-    # Retrieve memories
-    retrieved_memories = []
-    if request.include_memories and memory_engine.memory_count > 0:
-        # Use current message, fallback to last user message from conversation
-        search_message = request.message
-        if not search_message and conversation:
-            # Find last user message in conversation that looks like a real user message
-            # (not a corrupted AI response saved as user message)
-            for msg in reversed(conversation):
-                if msg.role == "user" and msg.content:
-                    # Skip very long messages (likely corrupted AI responses)
-                    # Real user messages are usually under 2000 chars
-                    if len(msg.content) < 2000:
-                        search_message = msg.content
-                        logger.info(f"Using last user message for search: '{search_message[:50]}...'")
-                        break
-                    else:
-                        logger.warning(f"Skipping suspiciously long 'user' message ({len(msg.content)} chars)")
-            
-            if not search_message:
-                logger.warning("No suitable user message found for memory search")
-        
-        # For memory search, extract the actual QUESTION from the message
-        # Long messages with preamble can overwhelm the search
-        context_for_search = _extract_question(search_message) if search_message else ""
-        
-        if context_for_search:
-            logger.debug(f"Search context: '{context_for_search[:100]}...'")
-        
-        # Skip search if we have no context at all
-        if not context_for_search.strip():
-            logger.warning("No search context available, skipping memory retrieval")
-        else:
-            # Check for temporal queries (e.g., "co robiliśmy wczoraj?")
-            temporal_result = _parse_temporal_query(context_for_search)
-            
-            if temporal_result:
-                # Use date-based search
-                start_date, end_date, cleaned_query = temporal_result
-                logger.info(f"Using temporal search: {start_date.date()} to {end_date.date()}")
-                
-                # If there's a semantic component, combine with date filter
-                if cleaned_query and len(cleaned_query) > 5:
-                    memory_results = memory_engine.search_memories_by_date(
-                        start_date=start_date,
-                        end_date=end_date,
-                        limit=settings.retrieval_top_k * 2,
-                        also_search_query=cleaned_query
-                    )
-                else:
-                    # Pure date search
-                    memory_results = memory_engine.search_memories_by_date(
-                        start_date=start_date,
-                        end_date=end_date,
-                        limit=settings.retrieval_top_k * 2
-                    )
-                
-                retrieved_memories = memory_results[:settings.retrieval_top_k]
-            else:
-                # Standard semantic search
-                # Apply query expansion if enabled
-                if settings.use_query_expansion:
-                    context_for_search = await query_expander.expand_query(context_for_search)
-                
-                # First pass: get initial candidates
-                memory_results, _, _ = memory_engine.search_memories(
-                    query=context_for_search,
-                    top_k=settings.retrieval_top_k * 2,
-                    use_hybrid=settings.use_hybrid_search
-                )
-                
-                # Second pass: use memory context to find related memories
-                # Use the extracted question for refinement
-                question_for_refinement = _extract_question(search_message) if search_message else ""
-                if settings.use_query_expansion and memory_results and question_for_refinement:
-                    memory_summaries = [r.memory.content[:150] for r in memory_results[:5]]
-                    refined_query = await query_expander.expand_with_memory_context(
-                        question_for_refinement,
-                        memory_summaries
-                    )
-                    
-                    if refined_query != search_message:
-                        refined_results, _, _ = memory_engine.search_memories(
-                            query=refined_query,
-                            top_k=settings.retrieval_top_k,
-                            use_hybrid=settings.use_hybrid_search
-                        )
-                        
-                        seen_ids = {r.memory.id for r in refined_results}
-                        for r in memory_results:
-                            if r.memory.id not in seen_ids and len(refined_results) < settings.retrieval_top_k:
-                                refined_results.append(r)
-                                seen_ids.add(r.memory.id)
-                        
-                        memory_results = refined_results[:settings.retrieval_top_k]
-                
-                retrieved_memories = memory_results[:settings.retrieval_top_k]
-    
+    # Build conversation history for LLM (needed for memory search criteria)
     # Include internal_monologue so Katherine can continue her previous thoughts
     history = [
         {
@@ -770,6 +803,218 @@ async def chat_stream(request: ChatRequest):
         } 
         for m in conversation[-settings.conversation_window:]
     ]
+    
+    # Retrieve memories
+    retrieved_memories = []
+    if request.include_memories and memory_engine.memory_count > 0:
+        # Przygotuj ostatnie wiadomości dla analizy (priorytetyzuj najnowszą)
+        recent_messages = []
+        if request.message:
+            recent_messages.append({
+                "role": "user",
+                "content": request.message
+            })
+        
+        # Dodaj ostatnie wiadomości z konwersacji (max 4, żeby najnowsza była priorytetem)
+        if conversation:
+            for msg in reversed(conversation[-4:]):  # Ostatnie 4 wiadomości
+                if msg.role in ["user", "assistant"] and msg.content:
+                    # Pomiń bardzo długie wiadomości (prawdopodobnie zepsute odpowiedzi AI)
+                    if len(msg.content) < 2000:
+                        recent_messages.append({
+                            "role": msg.role,
+                            "content": msg.content
+                        })
+        
+        if not recent_messages:
+            logger.warning("No messages available for memory search")
+        else:
+            # NOWE PODEJŚCIE: Zapytaj Katherine o kryteria wyszukiwania
+            if settings.use_persona_aware_memory_search:
+                try:
+                    criteria = await generate_memory_search_criteria(
+                        recent_messages=recent_messages,
+                        conversation_history=history
+                    )
+                    
+                    logger.info(f"Executing memory search with Katherine's criteria (type: {criteria.query_type})")
+                    
+                    # Wykonaj wyszukiwanie na podstawie kryteriów
+                    if criteria.query_type == "temporal":
+                        # Temporal search
+                        if criteria.start_date and criteria.end_date:
+                            if criteria.semantic_query and len(criteria.semantic_query) > 5:
+                                memory_results = memory_engine.search_memories_by_date(
+                                    start_date=criteria.start_date,
+                                    end_date=criteria.end_date,
+                                    limit=settings.retrieval_top_k * 2,
+                                    also_search_query=criteria.semantic_query
+                                )
+                            else:
+                                memory_results = memory_engine.search_memories_by_date(
+                                    start_date=criteria.start_date,
+                                    end_date=criteria.end_date,
+                                    limit=settings.retrieval_top_k * 2
+                                )
+                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        else:
+                            # Fallback do semantic search jeśli daty niepoprawne
+                            logger.warning("Temporal query but invalid dates, falling back to semantic")
+                            if criteria.semantic_query:
+                                memory_results, _, _ = memory_engine.search_memories(
+                                    query=criteria.semantic_query,
+                                    top_k=settings.retrieval_top_k * 2,
+                                    use_hybrid=settings.use_hybrid_search
+                                )
+                                retrieved_memories = memory_results[:settings.retrieval_top_k]
+                    
+                    elif criteria.query_type == "special":
+                        # Special criteria search
+                        if criteria.special_criteria:
+                            memory_results = memory_engine.search_memories_special(
+                                special_criteria=criteria.special_criteria,
+                                semantic_query=criteria.semantic_query,
+                                limit=settings.retrieval_top_k
+                            )
+                            retrieved_memories = memory_results
+                        else:
+                            # Fallback do semantic
+                            if criteria.semantic_query:
+                                memory_results, _, _ = memory_engine.search_memories(
+                                    query=criteria.semantic_query,
+                                    top_k=settings.retrieval_top_k * 2,
+                                    use_hybrid=settings.use_hybrid_search
+                                )
+                                retrieved_memories = memory_results[:settings.retrieval_top_k]
+                    
+                    elif criteria.query_type == "combined":
+                        # Combined: temporal + semantic lub special + semantic
+                        if criteria.start_date and criteria.end_date:
+                            # Temporal + semantic
+                            memory_results = memory_engine.search_memories_by_date(
+                                start_date=criteria.start_date,
+                                end_date=criteria.end_date,
+                                limit=settings.retrieval_top_k * 2,
+                                also_search_query=criteria.semantic_query
+                            )
+                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        elif criteria.special_criteria:
+                            # Special + semantic
+                            memory_results = memory_engine.search_memories_special(
+                                special_criteria=criteria.special_criteria,
+                                semantic_query=criteria.semantic_query,
+                                limit=settings.retrieval_top_k
+                            )
+                            retrieved_memories = memory_results
+                        else:
+                            # Fallback do semantic
+                            if criteria.semantic_query:
+                                memory_results, _, _ = memory_engine.search_memories(
+                                    query=criteria.semantic_query,
+                                    top_k=settings.retrieval_top_k * 2,
+                                    use_hybrid=settings.use_hybrid_search
+                                )
+                                retrieved_memories = memory_results[:settings.retrieval_top_k]
+                    
+                    else:
+                        # Standard semantic search
+                        if criteria.semantic_query:
+                            memory_results, _, _ = memory_engine.search_memories(
+                                query=criteria.semantic_query,
+                                top_k=settings.retrieval_top_k * 2,
+                                use_hybrid=settings.use_hybrid_search
+                            )
+                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+                
+                except Exception as e:
+                    logger.error(f"Persona-aware memory search failed: {e}, falling back to old method")
+                    # FALLBACK: Stare podejście
+                    search_message = request.message
+                    if not search_message and conversation:
+                        for msg in reversed(conversation):
+                            if msg.role == "user" and msg.content:
+                                if len(msg.content) < 2000:
+                                    search_message = msg.content
+                                    break
+                    
+                    context_for_search = _extract_question(search_message) if search_message else ""
+                    
+                    if context_for_search.strip():
+                        # Stare podejście z temporal parsing
+                        temporal_result = _parse_temporal_query(context_for_search)
+                        
+                        if temporal_result:
+                            start_date, end_date, cleaned_query = temporal_result
+                            if cleaned_query and len(cleaned_query) > 5:
+                                memory_results = memory_engine.search_memories_by_date(
+                                    start_date=start_date,
+                                    end_date=end_date,
+                                    limit=settings.retrieval_top_k * 2,
+                                    also_search_query=cleaned_query
+                                )
+                            else:
+                                memory_results = memory_engine.search_memories_by_date(
+                                    start_date=start_date,
+                                    end_date=end_date,
+                                    limit=settings.retrieval_top_k * 2
+                                )
+                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        else:
+                            # Standard semantic search z query expansion
+                            if settings.use_query_expansion:
+                                context_for_search = await query_expander.expand_query(context_for_search)
+                            
+                            memory_results, _, _ = memory_engine.search_memories(
+                                query=context_for_search,
+                                top_k=settings.retrieval_top_k * 2,
+                                use_hybrid=settings.use_hybrid_search
+                            )
+                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+            else:
+                # FALLBACK: Stare podejście (jeśli flaga wyłączona)
+                search_message = request.message
+                if not search_message and conversation:
+                    for msg in reversed(conversation):
+                        if msg.role == "user" and msg.content:
+                            if len(msg.content) < 2000:
+                                search_message = msg.content
+                                break
+                
+                context_for_search = _extract_question(search_message) if search_message else ""
+                
+                if context_for_search.strip():
+                    # Stare podejście z temporal parsing
+                    temporal_result = _parse_temporal_query(context_for_search)
+                    
+                    if temporal_result:
+                        start_date, end_date, cleaned_query = temporal_result
+                        if cleaned_query and len(cleaned_query) > 5:
+                            memory_results = memory_engine.search_memories_by_date(
+                                start_date=start_date,
+                                end_date=end_date,
+                                limit=settings.retrieval_top_k * 2,
+                                also_search_query=cleaned_query
+                            )
+                        else:
+                            memory_results = memory_engine.search_memories_by_date(
+                                start_date=start_date,
+                                end_date=end_date,
+                                limit=settings.retrieval_top_k * 2
+                            )
+                        retrieved_memories = memory_results[:settings.retrieval_top_k]
+                    else:
+                        # Standard semantic search z query expansion
+                        if settings.use_query_expansion:
+                            context_for_search = await query_expander.expand_query(context_for_search)
+                        
+                        memory_results, _, _ = memory_engine.search_memories(
+                            query=context_for_search,
+                            top_k=settings.retrieval_top_k * 2,
+                            use_hybrid=settings.use_hybrid_search
+                        )
+                        retrieved_memories = memory_results[:settings.retrieval_top_k]
+    
+    # History was already built above for memory search criteria
     
     memory_dicts = [
         {
