@@ -476,9 +476,10 @@ async def chat(request: ChatRequest):
                 "content": request.message
             })
         
-        # Dodaj ostatnie wiadomości z konwersacji (max 4, żeby najnowsza była priorytetem)
+        # Dodaj ostatnie wiadomości z konwersacji (max 2, żeby najnowsza była dominująca)
+        # Ograniczamy do 2 starych wiadomości, żeby priorytetyzować najnowszą
         if conversation:
-            for msg in reversed(conversation[-4:]):  # Ostatnie 4 wiadomości
+            for msg in reversed(conversation[-2:]):  # Tylko 2 ostatnie wiadomości
                 if msg.role in ["user", "assistant"] and msg.content:
                     # Pomiń bardzo długie wiadomości (prawdopodobnie zepsute odpowiedzi AI)
                     if len(msg.content) < 2000:
@@ -714,7 +715,7 @@ async def chat(request: ChatRequest):
     self_dev_reflection = None
     if self_dev_tracker.should_trigger_reflection():
         self_dev_reflection = self_dev_tracker.get_reflection_prompt()
-    
+        
     # Build prompt with injected memories (RAG injection step)
     messages = build_prompt_with_memories(
         user_message=request.message,
@@ -815,9 +816,10 @@ async def chat_stream(request: ChatRequest):
                 "content": request.message
             })
         
-        # Dodaj ostatnie wiadomości z konwersacji (max 4, żeby najnowsza była priorytetem)
+        # Dodaj ostatnie wiadomości z konwersacji (max 2, żeby najnowsza była dominująca)
+        # Ograniczamy do 2 starych wiadomości, żeby priorytetyzować najnowszą
         if conversation:
-            for msg in reversed(conversation[-4:]):  # Ostatnie 4 wiadomości
+            for msg in reversed(conversation[-2:]):  # Tylko 2 ostatnie wiadomości
                 if msg.role in ["user", "assistant"] and msg.content:
                     # Pomiń bardzo długie wiadomości (prawdopodobnie zepsute odpowiedzi AI)
                     if len(msg.content) < 2000:

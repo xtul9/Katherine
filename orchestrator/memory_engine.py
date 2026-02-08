@@ -1012,13 +1012,17 @@ class MemoryEngine:
             memories = [r.memory for r in results]
         else:
             # Pobierz wszystkie wspomnienia
-            memories = self.get_all_memories(limit=limit * 10)
+            memories = self.get_all_memories(limit=0)
         
         # Zastosuj specjalne kryteria sortowania
         if special_criteria == "oldest":
             memories.sort(key=lambda m: m.created_at)
+            # only return the very oldest memory
+            return [MemorySearchResult(memory=memories[0], similarity=1.0)]
         elif special_criteria == "newest":
             memories.sort(key=lambda m: m.created_at, reverse=True)
+            # only return the very newest memory
+            return [MemorySearchResult(memory=memories[0], similarity=1.0)]
         elif special_criteria == "most_important":
             memories.sort(key=lambda m: m.importance, reverse=True)
         elif special_criteria == "most_emotional":

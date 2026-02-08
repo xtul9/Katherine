@@ -598,14 +598,33 @@ async def generate_memory_search_criteria(
         pass  # Będziemy używać globalnego llm_client bezpośrednio
     
     # Przygotuj kontekst ostatnich wiadomości (priorytetyzuj najnowszą)
-    messages_context = []
-    for i, msg in enumerate(recent_messages[:5]):  # Max 5 ostatnich
-        priority = "HIGHEST" if i == 0 else "HIGH" if i < 2 else "MEDIUM"
-        messages_context.append(
-            f"[{priority} PRIORITY] {msg['role'].upper()}: {msg['content'][:300]}"
-        )
+    # Ograniczamy do maksymalnie 3 wiadomości, żeby najnowsza była dominująca
+    messages_to_analyze = recent_messages[:3]  # Tylko 3 najnowsze
     
-    context_text = "\n".join(messages_context)
+    # Najnowsza wiadomość jest WSZYSTKIM - reszta to tylko kontekst tła
+    current_message = messages_to_analyze[0] if messages_to_analyze else None
+    context_messages = messages_to_analyze[1:] if len(messages_to_analyze) > 1 else []
+    
+    # Formatuj najnowszą wiadomość jako główną
+    current_message_text = ""
+    if current_message:
+        current_message_text = f"""
+=== CURRENT MESSAGE (HIGHEST PRIORITY - THIS IS WHAT MATTERS) ===
+{current_message['role'].upper()}: {current_message['content']}
+=================================================================
+"""
+    
+    # Formatuj stare wiadomości jako tło (tylko jeśli są)
+    context_text = ""
+    if context_messages:
+        context_parts = []
+        for msg in context_messages:
+            context_parts.append(f"{msg['role'].upper()}: {msg['content'][:200]}")
+        context_text = f"""
+=== PREVIOUS CONTEXT (for reference only - lower priority) ===
+{chr(10).join(context_parts)}
+==============================================================
+"""
     
     # Pobierz aktualną datę dla temporal queries
     now = datetime.now(timezone.utc)
@@ -619,18 +638,24 @@ async def generate_memory_search_criteria(
 
 --- MEMORY SEARCH CRITERIA TASK ---
 
-You need to determine what memories to search for based on the recent conversation. 
-Analyze the messages below and determine the search criteria.
+⚠️ CRITICAL: The CURRENT MESSAGE below is the ONLY thing that matters for memory search.
+Previous messages are provided ONLY for context - if the current message changes topic,
+IGNORE the previous messages completely and focus ONLY on the current message.
 
-Recent messages (newest first, priority indicated):
-{context_text}
+{current_message_text}{context_text}
 
 Your task:
-1. Analyze what the user is asking about or what context is needed
-2. Determine the type of search needed
-3. Extract any temporal information (dates, time periods)
-4. Identify any special search criteria (oldest, newest, most important, etc.)
-5. Generate semantic query terms if needed
+1. ⚠️ FOCUS ON THE CURRENT MESSAGE FIRST - this is what the user is asking about NOW
+2. If the current message is about a completely different topic than previous messages, 
+   IGNORE previous messages and search only for memories related to the current topic
+3. Analyze what the user is asking about in the CURRENT MESSAGE
+4. Determine the type of search needed based on the CURRENT MESSAGE
+5. Extract any temporal information (dates, time periods) from the CURRENT MESSAGE
+6. Identify any special search criteria (oldest, newest, most important, etc.) from the CURRENT MESSAGE
+7. Generate semantic query terms based on the CURRENT MESSAGE's topic
+
+⚠️ REMEMBER: If the current message changes topic, previous context is IRRELEVANT.
+Only use previous messages if they provide necessary context for understanding the current message.
 
 Search types:
 - "temporal": User asks about a specific time period (yesterday, last week, etc.)
@@ -681,7 +706,11 @@ IMPORTANT:
         },
         {
             "role": "user",
-            "content": f"Analyze these messages and determine memory search criteria:\n\n{context_text}"
+            "content": f"""Determine memory search criteria based on the CURRENT MESSAGE.
+
+{current_message_text}{context_text}
+
+Remember: The CURRENT MESSAGE is what matters. If it's about a different topic than previous messages, ignore the previous context."""
         }
     ]
     
@@ -1354,6 +1383,7 @@ def build_prompt_with_memories(
     
     # Add current user message with monologue reminder injected
     # This is more reliable than a separate system message which some models ignore
+    
     if user_message:
         # Add timestamp to current user message
         # Using a distinct format to prevent AI from copying timestamps into responses
@@ -1362,7 +1392,7 @@ def build_prompt_with_memories(
             timestamp_str = _format_timestamp_for_ai(current_message_time)
             if timestamp_str:
                 user_content = f"«{timestamp_str}» {user_content}"
-        
+    
         monologue_reminder = f"\n\n[SYSTEM: Remember to end with {settings.monologue_separator}your private thoughts{settings.monologue_separator_closing_tag}]"
         messages.append({
             "role": "user",
