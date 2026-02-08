@@ -129,3 +129,31 @@ class HealthResponse(BaseModel):
     memory_count: int
     conversation_count: int
     message_count: int
+
+
+# === User Tags Models ===
+
+class UserTag(BaseModel):
+    """A tag describing the user, as perceived by the AI."""
+    tag: str
+    display_order: int
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class TagMove(BaseModel):
+    """Instruction to move a tag to a new position."""
+    tag: str
+    position: str  # "BEFORE tag_name", "AFTER tag_name", "TO_TOP", "TO_BOTTOM"
+
+
+class TagChanges(BaseModel):
+    """Changes to user tags extracted from inner monologue."""
+    add: list[str] = Field(default_factory=list)  # Tags to add
+    remove: list[str] = Field(default_factory=list)  # Tags to remove
+    move: list[TagMove] = Field(default_factory=list)  # Tags to move

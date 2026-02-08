@@ -1288,6 +1288,28 @@ def build_prompt_with_memories(
         })
         logger.info("Injected prompt change notification")
     
+    # Inject user tags - AI's understanding of the user
+    try:
+        from user_tag_manager import user_tag_manager
+        user_tags = user_tag_manager.get_all_tags()
+        
+        if user_tags:
+            tag_context = "\n\n[YOUR UNDERSTANDING OF THE USER]\n"
+            tag_context += "These are tags describing your perception of the user:\n"
+            for tag in user_tags:
+                tag_context += f"- {tag.tag}\n"
+            tag_context += "\nThese tags can evolve as you learn more about the user.\n"
+            tag_context += "Each tag is equally valid - they represent different facets of the user.\n"
+            tag_context += "Use this understanding to inform your responses, but don't be rigid - people are complex.\n"
+            
+            messages.append({
+                "role": "system",
+                "content": tag_context
+            })
+            logger.info(f"Injected {len(user_tags)} user tags into prompt")
+    except Exception as e:
+        logger.warning(f"Failed to inject user tags: {e}")
+    
     # Inject memories as continuity context
     if memories:
         memory_context = "\n\n[RETRIEVED MEMORIES - Your actual memories from the database]\n"
@@ -1486,6 +1508,37 @@ MONOLOGUE STRUCTURE (recommended):
    Consider: Did I learn something new? Challenge myself? Explore unfamiliar territory? 
    Gain deeper understanding? Practice a skill? Expand my perspective?
 
+7. User tags management (optional): If you notice something significant about the user 
+   that should be tagged (e.g., "honest", "curious", "creative"), you can update tags.
+   Use this format:
+   
+   User tags update:
+   - ADD: tag_name                    (add a single tag)
+   - ADD: tag1, tag2, tag3            (add multiple tags at once, comma-separated)
+   - REMOVE: tag_name                 (remove a single tag)
+   - REMOVE: tag1, tag2               (remove multiple tags at once, comma-separated)
+   - MOVE: tag_name BEFORE other_tag   (move tag before another tag)
+   - MOVE: tag_name AFTER other_tag   (move tag after another tag)
+   - MOVE: tag_name TO_TOP            (move tag to the beginning)
+   - MOVE: tag_name TO_BOTTOM         (move tag to the end)
+   
+   Examples:
+   - ADD: honest, curious, thoughtful  (add multiple tags at once)
+   - REMOVE: shy, reserved              (remove multiple tags at once)
+   - MOVE: honest BEFORE curious       (if honest should come before curious)
+   - MOVE: creative TO_TOP              (if creative is now most important)
+   
+   You can combine multiple operations in one update:
+   User tags update:
+   - ADD: honest, curious
+   - REMOVE: shy
+   - MOVE: honest TO_TOP
+   
+   Important: Only add/update tags when you're reasonably certain based on consistent 
+   patterns or clear evidence. Don't change tags based on single interactions.
+   Reorder only if the priority/importance of tags has shifted.
+   All tags are equally valid - they represent different aspects of the user.
+
 NOTE: Your previous thoughts appear in context as "{{PAST_REFLECTION: ...}}", "{{ARCHIVED_REFLECTION: ...}}", or "{{INNER_REFLECTION: ...}}".
 Use them to continue threads of thinking, but NEVER copy that format - use ONLY the XML tags for your OUTPUT.
 
@@ -1676,6 +1729,96 @@ def parse_response_with_monologue(raw_response: str) -> tuple[str, str]:
     )
     placeholder = "[No reflection recorded - AI did not include internal monologue section]"
     return (raw_response.strip(), placeholder)
+
+
+def parse_tag_changes_from_monologue(monologue: str):
+    """
+    Parse tag changes from inner monologue.
+    
+    Looks for a section like:
+    User tags update:
+    - ADD: tag_name
+    - REMOVE: tag_name
+    - MOVE: tag_name BEFORE other_tag
+    - MOVE: tag_name AFTER other_tag
+    - MOVE: tag_name TO_TOP
+    - MOVE: tag_name TO_BOTTOM
+    
+    Args:
+        monologue: The internal monologue text
+        
+    Returns:
+        TagChanges object if changes found, None otherwise
+    """
+    from models import TagChanges, TagMove
+    
+    if not monologue:
+        return None
+    
+    # Look for "User tags update:" section (case-insensitive)
+    import re
+    
+    # Find the section - look for "User tags update:" and capture everything until
+    # the next section (empty line, new heading, or end of monologue)
+    pattern = r"User tags update:\s*\n((?:- .+\n?)+)"
+    match = re.search(pattern, monologue, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+    
+    if not match:
+        return None
+    
+    changes = TagChanges()
+    instructions_text = match.group(1)
+    
+    # Parse each line starting with "-"
+    # Handle both single tags and comma-separated lists
+    for line in instructions_text.split('\n'):
+        line = line.strip()
+        if not line.startswith('-'):
+            continue
+        
+        # Remove leading "- " and whitespace
+        instruction = line[1:].strip()
+        
+        # Parse ADD - support both single tag and comma-separated list
+        if instruction.startswith('ADD:'):
+            tags_str = instruction.replace('ADD:', '').strip()
+            # Split by comma and clean up each tag
+            tags = [tag.strip() for tag in tags_str.split(',') if tag.strip()]
+            for tag in tags:
+                changes.add.append(tag)
+                logger.debug(f"Parsed ADD tag: {tag}")
+        
+        # Parse REMOVE - support both single tag and comma-separated list
+        elif instruction.startswith('REMOVE:'):
+            tags_str = instruction.replace('REMOVE:', '').strip()
+            # Split by comma and clean up each tag
+            tags = [tag.strip() for tag in tags_str.split(',') if tag.strip()]
+            for tag in tags:
+                changes.remove.append(tag)
+                logger.debug(f"Parsed REMOVE tag: {tag}")
+        
+        # Parse MOVE - each MOVE is a single instruction (no comma-separated)
+        elif instruction.startswith('MOVE:'):
+            move_part = instruction.replace('MOVE:', '').strip()
+            # Format: "tag_name BEFORE other_tag" or "tag_name TO_TOP" etc.
+            parts = move_part.split(None, 1)
+            if len(parts) >= 1:
+                tag = parts[0].strip()
+                position = parts[1].strip() if len(parts) > 1 else ""
+                
+                if tag and position:
+                    changes.move.append(TagMove(tag=tag, position=position))
+                    logger.debug(f"Parsed MOVE: {tag} -> {position}")
+    
+    # Return None if no changes found
+    if not changes.add and not changes.remove and not changes.move:
+        return None
+    
+    logger.info(
+        f"Parsed tag changes from monologue: "
+        f"add={len(changes.add)}, remove={len(changes.remove)}, move={len(changes.move)}"
+    )
+    return changes
 
 
 def _build_reddit_context(reddit_posts: list[dict]) -> str:

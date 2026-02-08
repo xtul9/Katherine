@@ -146,3 +146,10 @@ export interface SelfDevelopmentStatus {
   last_reflection_time: string | null
   recent_assessments: SelfDevelopmentAssessment[]
 }
+
+export interface UserTag {
+  tag: string
+  display_order: number
+  created_at: string
+  updated_at: string
+}

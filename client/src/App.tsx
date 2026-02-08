@@ -6,7 +6,7 @@
 import { useEffect, useCallback, useRef, useState, memo, useMemo } from 'react'
 import { useChatStore } from './store'
 import { api } from './api'
-import type { Message } from './types'
+import type { Message, UserTag } from './types'
 import { clsx } from 'clsx'
 import { formatDistanceToNow } from 'date-fns'
 import MemoryAdmin from './MemoryAdmin'
@@ -679,6 +679,131 @@ function StatusBar({ conversationId }: StatusBarProps) {
 }
 
 // ============================================================================
+// User Tags Panel Component
+// ============================================================================
+
+interface UserTagsPanelProps {
+  onClose: () => void
+  refreshTrigger?: number  // Increment this to trigger refresh
+}
+
+function UserTagsPanel({ onClose, refreshTrigger }: UserTagsPanelProps) {
+  const [tags, setTags] = useState<UserTag[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const loadTags = useCallback(async () => {
+    try {
+      setIsLoading(true)
+      setError(null)
+      const userTags = await api.getUserTags()
+      setTags(userTags)
+    } catch (e) {
+      console.error('Failed to load user tags:', e)
+      setError(e instanceof Error ? e.message : 'Failed to load tags')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [])
+
+  // Load tags on mount
+  useEffect(() => {
+    loadTags()
+  }, [loadTags])
+
+  // Refresh when refreshTrigger changes (after AI finishes responding)
+  useEffect(() => {
+    if (refreshTrigger !== undefined && refreshTrigger > 0) {
+      loadTags()
+    }
+  }, [refreshTrigger, loadTags])
+
+  return (
+    <div className="fixed inset-0 bg-void-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
+      <div className="bg-void-900 rounded-2xl border border-void-800 shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col animate-slide-up">
+        {/* Header */}
+        <div className="flex items-center justify-between p-6 border-b border-void-800">
+          <div>
+            <h2 className="text-xl font-display font-semibold text-void-100">
+              AI's Understanding of You
+            </h2>
+            <p className="text-sm text-void-500 mt-1">
+              Tags describing how Katherine perceives you (curated by AI)
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 text-void-400 hover:text-void-200 hover:bg-void-800/50 rounded-lg transition-colors"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {isLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="flex gap-1.5">
+                <span className="w-2 h-2 bg-void-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-2 h-2 bg-void-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-2 h-2 bg-void-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              </div>
+            </div>
+          ) : error ? (
+            <div className="text-center py-12">
+              <p className="text-void-400">{error}</p>
+            </div>
+          ) : tags.length === 0 ? (
+            <div className="text-center py-12">
+              <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-void-800/50 flex items-center justify-center">
+                <svg className="w-8 h-8 text-void-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+                </svg>
+              </div>
+              <p className="text-void-400">No tags yet</p>
+              <p className="text-sm text-void-500 mt-2">
+                Tags will appear here as Katherine learns about you
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {tags.map((tag, index) => (
+                <div
+                  key={tag.tag}
+                  className="flex items-center gap-3 p-4 bg-void-800/50 rounded-xl border border-void-700/30 hover:border-void-600/50 transition-colors animate-fade-in"
+                  style={{ animationDelay: `${index * 50}ms` }}
+                >
+                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-ember-500/20 to-ember-600/20 flex items-center justify-center border border-ember-500/30">
+                    <span className="text-xs font-semibold text-ember-400">
+                      {index + 1}
+                    </span>
+                  </div>
+                  <div className="flex-1">
+                    <div className="font-medium text-void-200">{tag.tag}</div>
+                    <div className="text-xs text-void-500 mt-0.5">
+                      Added {formatDistanceToNow(new Date(tag.created_at), { addSuffix: true })}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="p-4 border-t border-void-800 bg-void-900/50">
+          <p className="text-xs text-void-500 text-center">
+            Tags are automatically updated by AI based on conversations
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ============================================================================
 // Archival Panel Component
 // ============================================================================
 
@@ -937,8 +1062,11 @@ export default function App() {
   const [showMemoryAdmin, setShowMemoryAdmin] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [showArchival, setShowArchival] = useState(false)
+  const [showUserTags, setShowUserTags] = useState(false)
+  const [tagsRefreshTrigger, setTagsRefreshTrigger] = useState(0)
   const prevMessagesLengthRef = useRef(messages.length)
   const wasStreamingRef = useRef(false)
+  const wasThinkingRef = useRef(false)
 
   // Scroll to bottom only on new messages or when streaming starts
   // NOT on every streaming content update (causes performance issues)
@@ -953,6 +1081,20 @@ export default function App() {
     prevMessagesLengthRef.current = messages.length
     wasStreamingRef.current = isStreaming
   }, [messages.length, isStreaming])
+
+  // Refresh user tags when AI finishes responding (streaming and thinking both become false)
+  useEffect(() => {
+    const wasActive = wasStreamingRef.current || wasThinkingRef.current
+    const isActive = isStreaming || isThinking
+    
+    // If we were active (streaming/thinking) and now we're not, refresh tags
+    if (wasActive && !isActive) {
+      setTagsRefreshTrigger(prev => prev + 1)
+    }
+    
+    wasStreamingRef.current = isStreaming
+    wasThinkingRef.current = isThinking
+  }, [isStreaming, isThinking])
 
   // Health check on mount
   useEffect(() => {
@@ -1162,6 +1304,15 @@ export default function App() {
             Archiwum
           </button>
           <button
+            onClick={() => setShowUserTags(true)}
+            className="px-4 py-2 text-sm text-void-400 hover:text-void-200 hover:bg-void-800/50 rounded-lg transition-colors flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+            </svg>
+            Tagi
+          </button>
+          <button
             onClick={clearChat}
             className="px-4 py-2 text-sm text-void-400 hover:text-void-200 hover:bg-void-800/50 rounded-lg transition-colors"
           >
@@ -1273,6 +1424,14 @@ export default function App() {
       {/* Archival Panel */}
       {showArchival && (
         <ArchivalPanel onClose={() => setShowArchival(false)} />
+      )}
+
+      {/* User Tags Panel */}
+      {showUserTags && (
+        <UserTagsPanel 
+          onClose={() => setShowUserTags(false)} 
+          refreshTrigger={tagsRefreshTrigger}
+        />
       )}
     </div>
   )

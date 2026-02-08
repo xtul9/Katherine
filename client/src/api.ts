@@ -2,7 +2,7 @@
  * Katherine Client - API Layer
  */
 
-import type { ChatRequest, ChatResponse, HealthStatus, Memory, MemorySearchResult, StreamEvent, Conversation, ConversationDetail, ContextWindowStats, ExpiredMessagesResponse, ArchivalStats, ArchivalResult, FullArchivalResult, AutoArchivalStatus, SelfDevelopmentStatus } from './types'
+import type { ChatRequest, ChatResponse, HealthStatus, Memory, MemorySearchResult, StreamEvent, Conversation, ConversationDetail, ContextWindowStats, ExpiredMessagesResponse, ArchivalStats, ArchivalResult, FullArchivalResult, AutoArchivalStatus, SelfDevelopmentStatus, UserTag } from './types'
 
 const API_BASE = '/api'
 
@@ -340,6 +340,17 @@ export const api = {
    */
   async resetSelfDevelopment(): Promise<SelfDevelopmentStatus & { status: string }> {
     return request('/self-development/reset', { method: 'POST' })
+  },
+
+  // =========================================================================
+  // User Tags
+  // =========================================================================
+
+  /**
+   * Get all user tags - AI's current understanding of the user
+   */
+  async getUserTags(): Promise<UserTag[]> {
+    return request<UserTag[]>('/user/tags')
   },
 }
 

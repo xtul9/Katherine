@@ -741,6 +741,18 @@ async def chat(request: ChatRequest):
     # Parse response to separate public part from internal monologue
     public_response, internal_monologue = parse_response_with_monologue(raw_response)
     
+    # Parse and apply tag changes from inner monologue
+    try:
+        from user_tag_manager import user_tag_manager
+        from llm_client import parse_tag_changes_from_monologue
+        
+        tag_changes = parse_tag_changes_from_monologue(internal_monologue)
+        if tag_changes:
+            user_tag_manager.apply_tag_changes(tag_changes)
+            logger.info(f"Applied tag changes from monologue: add={len(tag_changes.add)}, remove={len(tag_changes.remove)}, move={len(tag_changes.move)}")
+    except Exception as e:
+        logger.warning(f"Failed to parse/apply tag changes: {e}")
+    
     # Record self-development assessment from internal monologue
     self_dev_tracker.record_assessment(
         internal_monologue=internal_monologue,
@@ -1101,6 +1113,18 @@ async def chat_stream(request: ChatRequest):
         
         # Parse the full response to extract internal monologue
         public_response, internal_monologue = parse_response_with_monologue(full_response)
+        
+        # Parse and apply tag changes from inner monologue
+        try:
+            from user_tag_manager import user_tag_manager
+            from llm_client import parse_tag_changes_from_monologue
+            
+            tag_changes = parse_tag_changes_from_monologue(internal_monologue)
+            if tag_changes:
+                user_tag_manager.apply_tag_changes(tag_changes)
+                logger.info(f"Applied tag changes from monologue: add={len(tag_changes.add)}, remove={len(tag_changes.remove)}, move={len(tag_changes.move)}")
+        except Exception as e:
+            logger.warning(f"Failed to parse/apply tag changes: {e}")
         
         # Record self-development assessment from internal monologue
         self_dev_tracker.record_assessment(
@@ -1640,6 +1664,23 @@ async def rebuild_all_memories(mode: str = "llm"):
         "total_memories_created": total_memories,
         "errors": all_errors
     }
+
+
+# === User Tags ===
+
+@app.get("/user/tags")
+async def get_user_tags():
+    """
+    Get all user tags - AI's current understanding of the user.
+    
+    Returns:
+        List of UserTag objects sorted by display_order
+    """
+    from user_tag_manager import user_tag_manager
+    from models import UserTag
+    
+    tags = user_tag_manager.get_all_tags()
+    return tags
 
 
 # === Run Server ===
