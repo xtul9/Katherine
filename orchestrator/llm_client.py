@@ -562,7 +562,8 @@ SYSTEM_PROMPT = load_persona()
 @dataclass
 class MemorySearchCriteria:
     """Kryteria wyszukiwania wspomnień określone przez Katherine."""
-    query_type: str  # "temporal", "special", "semantic", "combined"
+    should_search_memories: bool = True  # Czy w ogóle szukać wspomnień
+    query_type: str = "semantic"  # "temporal", "special", "semantic", "combined"
     semantic_query: Optional[str] = None  # Query dla semantic search
     start_date: Optional[datetime] = None  # Dla temporal queries
     end_date: Optional[datetime] = None  # Dla temporal queries
@@ -645,17 +646,23 @@ IGNORE the previous messages completely and focus ONLY on the current message.
 {current_message_text}{context_text}
 
 Your task:
-1. ⚠️ FOCUS ON THE CURRENT MESSAGE FIRST - this is what the user is asking about NOW
-2. If the current message is about a completely different topic than previous messages, 
+1. ⚠️ FIRST AND MOST IMPORTANT: Determine if you want to recall/remember anything based on the CURRENT MESSAGE
+   - Do you feel the need to search your memories to answer this question?
+   - Is this about something from your past that you might remember?
+   - If the message is about current events, new information, or doesn't require recalling past memories, set should_search_memories to false
+   - If you don't need to recall anything, set should_search_memories to false and you can skip the rest of the analysis
+2. ⚠️ FOCUS ON THE CURRENT MESSAGE FIRST - this is what the user is asking about NOW
+3. If the current message is about a completely different topic than previous messages, 
    IGNORE previous messages and search only for memories related to the current topic
-3. Analyze what the user is asking about in the CURRENT MESSAGE
-4. Determine the type of search needed based on the CURRENT MESSAGE
-5. Extract any temporal information (dates, time periods) from the CURRENT MESSAGE
-6. Identify any special search criteria (oldest, newest, most important, etc.) from the CURRENT MESSAGE
-7. Generate semantic query terms based on the CURRENT MESSAGE's topic
+4. Analyze what the user is asking about in the CURRENT MESSAGE
+5. Determine the type of search needed based on the CURRENT MESSAGE (only if should_search_memories is true)
+6. Extract any temporal information (dates, time periods) from the CURRENT MESSAGE
+7. Identify any special search criteria (oldest, newest, most important, etc.) from the CURRENT MESSAGE
+8. Generate semantic query terms based on the CURRENT MESSAGE's topic
 
 ⚠️ REMEMBER: If the current message changes topic, previous context is IRRELEVANT.
 Only use previous messages if they provide necessary context for understanding the current message.
+⚠️ CRITICAL: If you don't need to recall anything from your memories, set should_search_memories to false.
 
 Search types:
 - "temporal": User asks about a specific time period (yesterday, last week, etc.)
@@ -684,16 +691,17 @@ Today's date: {today_str}
 
 Return your analysis as JSON:
 {{
-    "query_type": "temporal|special|semantic|combined",
-    "semantic_query": "key terms for semantic search (if needed)",
+    "should_search_memories": true or false,
+    "query_type": "temporal|special|semantic|combined" (only if should_search_memories is true),
+    "semantic_query": "key terms for semantic search (if needed, only if should_search_memories is true)",
     "temporal": {{
         "start_date": "YYYY-MM-DD" or null,
         "end_date": "YYYY-MM-DD" or null,
         "description": "human-readable description of the time period"
-    }},
+    }} (only if should_search_memories is true and query_type is temporal or combined),
     "special_criteria": "oldest|newest|most_important|most_emotional|by_importance|by_date" or null,
     "sort_by": "date|importance|relevance" or null,
-    "reasoning": "brief explanation of your analysis"
+    "reasoning": "brief explanation of your analysis, including why you do or don't want to search memories"
 }}
 
 IMPORTANT:
@@ -765,6 +773,7 @@ Remember: The CURRENT MESSAGE is what matters. If it's about a different topic t
                         pass
             
             criteria = MemorySearchCriteria(
+                should_search_memories=data.get("should_search_memories", True),
                 query_type=data.get("query_type", "semantic"),
                 semantic_query=data.get("semantic_query"),
                 start_date=start_date,
@@ -777,8 +786,12 @@ Remember: The CURRENT MESSAGE is what matters. If it's about a different topic t
             logger.info("=" * 80)
             logger.info("KATHERINE'S MEMORY SEARCH CRITERIA")
             logger.info("=" * 80)
-            logger.info(f"Query Type: {criteria.query_type}")
-            logger.info(f"Semantic Query: '{criteria.semantic_query}'" if criteria.semantic_query else "Semantic Query: None")
+            logger.info(f"Should Search Memories: {criteria.should_search_memories}")
+            if not criteria.should_search_memories:
+                logger.info("Katherine decided NOT to search memories - skipping search")
+            else:
+                logger.info(f"Query Type: {criteria.query_type}")
+                logger.info(f"Semantic Query: '{criteria.semantic_query}'" if criteria.semantic_query else "Semantic Query: None")
             
             if criteria.query_type == "temporal" or criteria.query_type == "combined":
                 if criteria.start_date and criteria.end_date:
@@ -786,13 +799,13 @@ Remember: The CURRENT MESSAGE is what matters. If it's about a different topic t
                 else:
                     logger.warning("Temporal query type but missing dates!")
             
-            if criteria.query_type == "special" or criteria.query_type == "combined":
-                if criteria.special_criteria:
-                    logger.info(f"Special Criteria: {criteria.special_criteria}")
-                else:
-                    logger.warning("Special query type but missing special_criteria!")
-            
-            logger.info(f"Sort By: {criteria.sort_by}")
+                if criteria.query_type == "special" or criteria.query_type == "combined":
+                    if criteria.special_criteria:
+                        logger.info(f"Special Criteria: {criteria.special_criteria}")
+                    else:
+                        logger.warning("Special query type but missing special_criteria!")
+                
+                logger.info(f"Sort By: {criteria.sort_by}")
             if data.get("reasoning"):
                 logger.info(f"Katherine's Reasoning: {data.get('reasoning')}")
             logger.info("=" * 80)

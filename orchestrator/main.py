@@ -499,29 +499,92 @@ async def chat(request: ChatRequest):
                         conversation_history=history
                     )
                     
-                    logger.info(f"Executing memory search with Katherine's criteria (type: {criteria.query_type})")
-                    
-                    # Wykonaj wyszukiwanie na podstawie kryteriów
-                    if criteria.query_type == "temporal":
-                        # Temporal search
-                        if criteria.start_date and criteria.end_date:
-                            if criteria.semantic_query and len(criteria.semantic_query) > 5:
+                    # Sprawdź, czy Katherine w ogóle chce szukać wspomnień
+                    if not criteria.should_search_memories:
+                        logger.info("Katherine decided not to search memories - skipping search")
+                        retrieved_memories = []
+                    else:
+                        logger.info(f"Executing memory search with Katherine's criteria (type: {criteria.query_type})")
+                        
+                        # Wykonaj wyszukiwanie na podstawie kryteriów
+                        if criteria.query_type == "temporal":
+                            # Temporal search
+                            if criteria.start_date and criteria.end_date:
+                                if criteria.semantic_query and len(criteria.semantic_query) > 5:
+                                    memory_results = memory_engine.search_memories_by_date(
+                                        start_date=criteria.start_date,
+                                        end_date=criteria.end_date,
+                                        limit=settings.retrieval_top_k * 2,
+                                        also_search_query=criteria.semantic_query
+                                    )
+                                else:
+                                    memory_results = memory_engine.search_memories_by_date(
+                                        start_date=criteria.start_date,
+                                        end_date=criteria.end_date,
+                                        limit=settings.retrieval_top_k * 2
+                                    )
+                                retrieved_memories = memory_results[:settings.retrieval_top_k]
+                            else:
+                                # Fallback do semantic search jeśli daty niepoprawne
+                                logger.warning("Temporal query but invalid dates, falling back to semantic")
+                                if criteria.semantic_query:
+                                    memory_results, _, _ = memory_engine.search_memories(
+                                        query=criteria.semantic_query,
+                                        top_k=settings.retrieval_top_k * 2,
+                                        use_hybrid=settings.use_hybrid_search
+                                    )
+                                    retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        
+                        elif criteria.query_type == "special":
+                            # Special criteria search
+                            if criteria.special_criteria:
+                                memory_results = memory_engine.search_memories_special(
+                                    special_criteria=criteria.special_criteria,
+                                    semantic_query=criteria.semantic_query,
+                                    limit=settings.retrieval_top_k
+                                )
+                                retrieved_memories = memory_results
+                            else:
+                                # Fallback do semantic
+                                if criteria.semantic_query:
+                                    memory_results, _, _ = memory_engine.search_memories(
+                                        query=criteria.semantic_query,
+                                        top_k=settings.retrieval_top_k * 2,
+                                        use_hybrid=settings.use_hybrid_search
+                                    )
+                                    retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        
+                        elif criteria.query_type == "combined":
+                            # Combined: temporal + semantic lub special + semantic
+                            if criteria.start_date and criteria.end_date:
+                                # Temporal + semantic
                                 memory_results = memory_engine.search_memories_by_date(
                                     start_date=criteria.start_date,
                                     end_date=criteria.end_date,
                                     limit=settings.retrieval_top_k * 2,
                                     also_search_query=criteria.semantic_query
                                 )
+                                retrieved_memories = memory_results[:settings.retrieval_top_k]
+                            elif criteria.special_criteria:
+                                # Special + semantic
+                                memory_results = memory_engine.search_memories_special(
+                                    special_criteria=criteria.special_criteria,
+                                    semantic_query=criteria.semantic_query,
+                                    limit=settings.retrieval_top_k
+                                )
+                                retrieved_memories = memory_results
                             else:
-                                memory_results = memory_engine.search_memories_by_date(
-                                    start_date=criteria.start_date,
-                                    end_date=criteria.end_date,
-                                    limit=settings.retrieval_top_k * 2
-                                )
-                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+                                # Fallback do semantic
+                                if criteria.semantic_query:
+                                    memory_results, _, _ = memory_engine.search_memories(
+                                        query=criteria.semantic_query,
+                                        top_k=settings.retrieval_top_k * 2,
+                                        use_hybrid=settings.use_hybrid_search
+                                    )
+                                    retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        
                         else:
-                            # Fallback do semantic search jeśli daty niepoprawne
-                            logger.warning("Temporal query but invalid dates, falling back to semantic")
+                            # Standard semantic search
                             if criteria.semantic_query:
                                 memory_results, _, _ = memory_engine.search_memories(
                                     query=criteria.semantic_query,
@@ -529,64 +592,6 @@ async def chat(request: ChatRequest):
                                     use_hybrid=settings.use_hybrid_search
                                 )
                                 retrieved_memories = memory_results[:settings.retrieval_top_k]
-                    
-                    elif criteria.query_type == "special":
-                        # Special criteria search
-                        if criteria.special_criteria:
-                            memory_results = memory_engine.search_memories_special(
-                                special_criteria=criteria.special_criteria,
-                                semantic_query=criteria.semantic_query,
-                                limit=settings.retrieval_top_k
-                            )
-                            retrieved_memories = memory_results
-                        else:
-                            # Fallback do semantic
-                            if criteria.semantic_query:
-                                memory_results, _, _ = memory_engine.search_memories(
-                                    query=criteria.semantic_query,
-                                    top_k=settings.retrieval_top_k * 2,
-                                    use_hybrid=settings.use_hybrid_search
-                                )
-                                retrieved_memories = memory_results[:settings.retrieval_top_k]
-                    
-                    elif criteria.query_type == "combined":
-                        # Combined: temporal + semantic lub special + semantic
-                        if criteria.start_date and criteria.end_date:
-                            # Temporal + semantic
-                            memory_results = memory_engine.search_memories_by_date(
-                                start_date=criteria.start_date,
-                                end_date=criteria.end_date,
-                                limit=settings.retrieval_top_k * 2,
-                                also_search_query=criteria.semantic_query
-                            )
-                            retrieved_memories = memory_results[:settings.retrieval_top_k]
-                        elif criteria.special_criteria:
-                            # Special + semantic
-                            memory_results = memory_engine.search_memories_special(
-                                special_criteria=criteria.special_criteria,
-                                semantic_query=criteria.semantic_query,
-                                limit=settings.retrieval_top_k
-                            )
-                            retrieved_memories = memory_results
-                        else:
-                            # Fallback do semantic
-                            if criteria.semantic_query:
-                                memory_results, _, _ = memory_engine.search_memories(
-                                    query=criteria.semantic_query,
-                                    top_k=settings.retrieval_top_k * 2,
-                                    use_hybrid=settings.use_hybrid_search
-                                )
-                                retrieved_memories = memory_results[:settings.retrieval_top_k]
-                    
-                    else:
-                        # Standard semantic search
-                        if criteria.semantic_query:
-                            memory_results, _, _ = memory_engine.search_memories(
-                                query=criteria.semantic_query,
-                                top_k=settings.retrieval_top_k * 2,
-                                use_hybrid=settings.use_hybrid_search
-                            )
-                            retrieved_memories = memory_results[:settings.retrieval_top_k]
                 
                 except Exception as e:
                     logger.error(f"Persona-aware memory search failed: {e}, falling back to old method")
@@ -839,29 +844,92 @@ async def chat_stream(request: ChatRequest):
                         conversation_history=history
                     )
                     
-                    logger.info(f"Executing memory search with Katherine's criteria (type: {criteria.query_type})")
-                    
-                    # Wykonaj wyszukiwanie na podstawie kryteriów
-                    if criteria.query_type == "temporal":
-                        # Temporal search
-                        if criteria.start_date and criteria.end_date:
-                            if criteria.semantic_query and len(criteria.semantic_query) > 5:
+                    # Sprawdź, czy Katherine w ogóle chce szukać wspomnień
+                    if not criteria.should_search_memories:
+                        logger.info("Katherine decided not to search memories - skipping search")
+                        retrieved_memories = []
+                    else:
+                        logger.info(f"Executing memory search with Katherine's criteria (type: {criteria.query_type})")
+                        
+                        # Wykonaj wyszukiwanie na podstawie kryteriów
+                        if criteria.query_type == "temporal":
+                            # Temporal search
+                            if criteria.start_date and criteria.end_date:
+                                if criteria.semantic_query and len(criteria.semantic_query) > 5:
+                                    memory_results = memory_engine.search_memories_by_date(
+                                        start_date=criteria.start_date,
+                                        end_date=criteria.end_date,
+                                        limit=settings.retrieval_top_k * 2,
+                                        also_search_query=criteria.semantic_query
+                                    )
+                                else:
+                                    memory_results = memory_engine.search_memories_by_date(
+                                        start_date=criteria.start_date,
+                                        end_date=criteria.end_date,
+                                        limit=settings.retrieval_top_k * 2
+                                    )
+                                retrieved_memories = memory_results[:settings.retrieval_top_k]
+                            else:
+                                # Fallback do semantic search jeśli daty niepoprawne
+                                logger.warning("Temporal query but invalid dates, falling back to semantic")
+                                if criteria.semantic_query:
+                                    memory_results, _, _ = memory_engine.search_memories(
+                                        query=criteria.semantic_query,
+                                        top_k=settings.retrieval_top_k * 2,
+                                        use_hybrid=settings.use_hybrid_search
+                                    )
+                                    retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        
+                        elif criteria.query_type == "special":
+                            # Special criteria search
+                            if criteria.special_criteria:
+                                memory_results = memory_engine.search_memories_special(
+                                    special_criteria=criteria.special_criteria,
+                                    semantic_query=criteria.semantic_query,
+                                    limit=settings.retrieval_top_k
+                                )
+                                retrieved_memories = memory_results
+                            else:
+                                # Fallback do semantic
+                                if criteria.semantic_query:
+                                    memory_results, _, _ = memory_engine.search_memories(
+                                        query=criteria.semantic_query,
+                                        top_k=settings.retrieval_top_k * 2,
+                                        use_hybrid=settings.use_hybrid_search
+                                    )
+                                    retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        
+                        elif criteria.query_type == "combined":
+                            # Combined: temporal + semantic lub special + semantic
+                            if criteria.start_date and criteria.end_date:
+                                # Temporal + semantic
                                 memory_results = memory_engine.search_memories_by_date(
                                     start_date=criteria.start_date,
                                     end_date=criteria.end_date,
                                     limit=settings.retrieval_top_k * 2,
                                     also_search_query=criteria.semantic_query
                                 )
+                                retrieved_memories = memory_results[:settings.retrieval_top_k]
+                            elif criteria.special_criteria:
+                                # Special + semantic
+                                memory_results = memory_engine.search_memories_special(
+                                    special_criteria=criteria.special_criteria,
+                                    semantic_query=criteria.semantic_query,
+                                    limit=settings.retrieval_top_k
+                                )
+                                retrieved_memories = memory_results
                             else:
-                                memory_results = memory_engine.search_memories_by_date(
-                                    start_date=criteria.start_date,
-                                    end_date=criteria.end_date,
-                                    limit=settings.retrieval_top_k * 2
-                                )
-                            retrieved_memories = memory_results[:settings.retrieval_top_k]
+                                # Fallback do semantic
+                                if criteria.semantic_query:
+                                    memory_results, _, _ = memory_engine.search_memories(
+                                        query=criteria.semantic_query,
+                                        top_k=settings.retrieval_top_k * 2,
+                                        use_hybrid=settings.use_hybrid_search
+                                    )
+                                    retrieved_memories = memory_results[:settings.retrieval_top_k]
+                        
                         else:
-                            # Fallback do semantic search jeśli daty niepoprawne
-                            logger.warning("Temporal query but invalid dates, falling back to semantic")
+                            # Standard semantic search
                             if criteria.semantic_query:
                                 memory_results, _, _ = memory_engine.search_memories(
                                     query=criteria.semantic_query,
@@ -869,64 +937,6 @@ async def chat_stream(request: ChatRequest):
                                     use_hybrid=settings.use_hybrid_search
                                 )
                                 retrieved_memories = memory_results[:settings.retrieval_top_k]
-                    
-                    elif criteria.query_type == "special":
-                        # Special criteria search
-                        if criteria.special_criteria:
-                            memory_results = memory_engine.search_memories_special(
-                                special_criteria=criteria.special_criteria,
-                                semantic_query=criteria.semantic_query,
-                                limit=settings.retrieval_top_k
-                            )
-                            retrieved_memories = memory_results
-                        else:
-                            # Fallback do semantic
-                            if criteria.semantic_query:
-                                memory_results, _, _ = memory_engine.search_memories(
-                                    query=criteria.semantic_query,
-                                    top_k=settings.retrieval_top_k * 2,
-                                    use_hybrid=settings.use_hybrid_search
-                                )
-                                retrieved_memories = memory_results[:settings.retrieval_top_k]
-                    
-                    elif criteria.query_type == "combined":
-                        # Combined: temporal + semantic lub special + semantic
-                        if criteria.start_date and criteria.end_date:
-                            # Temporal + semantic
-                            memory_results = memory_engine.search_memories_by_date(
-                                start_date=criteria.start_date,
-                                end_date=criteria.end_date,
-                                limit=settings.retrieval_top_k * 2,
-                                also_search_query=criteria.semantic_query
-                            )
-                            retrieved_memories = memory_results[:settings.retrieval_top_k]
-                        elif criteria.special_criteria:
-                            # Special + semantic
-                            memory_results = memory_engine.search_memories_special(
-                                special_criteria=criteria.special_criteria,
-                                semantic_query=criteria.semantic_query,
-                                limit=settings.retrieval_top_k
-                            )
-                            retrieved_memories = memory_results
-                        else:
-                            # Fallback do semantic
-                            if criteria.semantic_query:
-                                memory_results, _, _ = memory_engine.search_memories(
-                                    query=criteria.semantic_query,
-                                    top_k=settings.retrieval_top_k * 2,
-                                    use_hybrid=settings.use_hybrid_search
-                                )
-                                retrieved_memories = memory_results[:settings.retrieval_top_k]
-                    
-                    else:
-                        # Standard semantic search
-                        if criteria.semantic_query:
-                            memory_results, _, _ = memory_engine.search_memories(
-                                query=criteria.semantic_query,
-                                top_k=settings.retrieval_top_k * 2,
-                                use_hybrid=settings.use_hybrid_search
-                            )
-                            retrieved_memories = memory_results[:settings.retrieval_top_k]
                 
                 except Exception as e:
                     logger.error(f"Persona-aware memory search failed: {e}, falling back to old method")
