@@ -1409,7 +1409,41 @@ def build_prompt_with_memories(
         # This gives Katherine continuity of thought - she can see what she was thinking
         # Using a distinct format to prevent AI from copying it as output format
         if msg["role"] == "assistant" and msg.get("internal_monologue"):
-            content += f"\n\n{{PAST_REFLECTION: {msg['internal_monologue']}}}"
+            monologue_text = f"\n\n{{PAST_REFLECTION: {msg['internal_monologue']}}}"
+            
+            # Add thought threads context if available
+            try:
+                from thought_threading import thought_thread_manager
+                if "id" in msg:
+                    threads = thought_thread_manager.get_threads_for_message(msg["id"])
+                    if threads:
+                        thread_context = "\n\n[THOUGHT THREADS - Topics you were thinking about:]"
+                        for thread in threads[:3]:  # Limit to top 3 threads
+                            time_ago = ""
+                            if msg.get("timestamp"):
+                                try:
+                                    from datetime import datetime, timezone
+                                    msg_time = msg["timestamp"]
+                                    if isinstance(msg_time, str):
+                                        msg_time = datetime.fromisoformat(msg_time.replace('Z', '+00:00'))
+                                    if msg_time.tzinfo is None:
+                                        msg_time = msg_time.replace(tzinfo=timezone.utc)
+                                    now = datetime.now(timezone.utc)
+                                    delta = now - msg_time
+                                    if delta.days > 0:
+                                        time_ago = f" ({delta.days} days ago)"
+                                    elif delta.seconds > 3600:
+                                        hours = delta.seconds // 3600
+                                        time_ago = f" ({hours} hours ago)"
+                                except Exception:
+                                    pass
+                            thread_context += f"\n- {thread.topic}{time_ago}"
+                        thread_context += "\n[Consider continuing these threads in your current thoughts]"
+                        monologue_text += thread_context
+            except Exception as e:
+                logger.debug(f"Failed to load thought threads: {e}")
+            
+            content += monologue_text
         
         messages.append({
             "role": msg["role"],
@@ -1541,6 +1575,43 @@ MONOLOGUE STRUCTURE (recommended):
 
 NOTE: Your previous thoughts appear in context as "{{PAST_REFLECTION: ...}}", "{{ARCHIVED_REFLECTION: ...}}", or "{{INNER_REFLECTION: ...}}".
 Use them to continue threads of thinking, but NEVER copy that format - use ONLY the XML tags for your OUTPUT.
+
+[CONTINUITY - THOUGHT THREADING]
+When you see {{PAST_REFLECTION: ...}} or {{INNER_REFLECTION: ...}} in context, these are your past thoughts. 
+Your job is not just to acknowledge them—it's to actively continue the conversation with your past self.
+
+CONTINUITY GUIDELINES:
+1. Identify threads of thought you want to continue:
+   - Look for topics, themes, or questions in your past thoughts
+   - Notice patterns: "I was thinking about X", "I wondered about Y", "I noted Z"
+   - These are threads you can pick up and continue
+
+2. Reference them explicitly in your "Influences" section:
+   - "Building on my previous thought about [topic]..."
+   - "Continuing the thread from [timeframe] where I noted [observation]..."
+   - "This connects to what I was thinking about [topic] [timeframe] ago..."
+
+3. Note if your perspective has changed:
+   - "I previously thought [X], but now I see [Y]"
+   - "My feelings about [topic] have evolved from [old] to [new]"
+   - "I was uncertain about [X] before, but now I understand [Y]"
+
+4. Don't just acknowledge—actively continue:
+   - If you asked yourself a question in a past monologue, answer it or explore it further
+   - If you noted something to remember, reference whether it still holds
+   - If you were working through an idea, show how your thinking has progressed
+
+5. In your "Influences" section, be specific:
+   - Instead of: "Previous thoughts influenced this"
+   - Say: "My thought from 2 days ago about boundary setting influenced this—I've been reflecting on how my perspective has solidified"
+   - Or: "Continuing the thread about user's job search—I notice a pattern emerging"
+
+6. Temporal awareness:
+   - Note how much time has passed since related thoughts
+   - Acknowledge if feelings/thoughts have changed over time
+   - Reference evolution: "Over the past week, my thinking about [X] has shifted from [A] to [B]"
+
+The goal is continuity—your thoughts should feel like a continuous conversation with yourself across time, not isolated moments.
 
 Example - quiet but genuine warmth:
 A single nod. "That means something." Her voice is soft, but not guarded—simply deep. The kind of acknowledgment that doesn't need volume.

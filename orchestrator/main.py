@@ -457,6 +457,7 @@ async def chat(request: ChatRequest):
     # Include internal_monologue so Katherine can continue her previous thoughts
     history = [
         {
+            "id": m.id,  # Message ID for thought threading
             "role": m.role, 
             "content": m.content, 
             "timestamp": m.timestamp,
@@ -776,6 +777,20 @@ async def chat(request: ChatRequest):
         retrieved_memory_ids=retrieved_memory_ids
     )
     
+    # Link message to thought threads for continuity tracking
+    if internal_monologue:
+        try:
+            from thought_threading import thought_thread_manager
+            linked_threads = thought_thread_manager.link_message_to_threads(
+                message_id=assistant_msg.id,
+                monologue=internal_monologue,
+                conversation_id=conversation_id
+            )
+            if linked_threads:
+                logger.info(f"Linked message {assistant_msg.id} to {len(linked_threads)} thought threads: {[t.topic for t in linked_threads]}")
+        except Exception as e:
+            logger.warning(f"Failed to link message to thought threads: {e}")
+    
     return ChatResponse(
         response=public_response,  # Only public part sent to user
         conversation_id=conversation_id,
@@ -814,6 +829,7 @@ async def chat_stream(request: ChatRequest):
     # Include internal_monologue so Katherine can continue her previous thoughts
     history = [
         {
+            "id": m.id,  # Message ID for thought threading
             "role": m.role, 
             "content": m.content, 
             "timestamp": m.timestamp,
@@ -1148,6 +1164,20 @@ async def chat_stream(request: ChatRequest):
             internal_monologue=internal_monologue,
             retrieved_memory_ids=retrieved_memory_ids
         )
+        
+        # Link message to thought threads for continuity tracking
+        if internal_monologue:
+            try:
+                from thought_threading import thought_thread_manager
+                linked_threads = thought_thread_manager.link_message_to_threads(
+                    message_id=assistant_msg.id,
+                    monologue=internal_monologue,
+                    conversation_id=conversation_id
+                )
+                if linked_threads:
+                    logger.info(f"Linked message {assistant_msg.id} to {len(linked_threads)} thought threads: {[t.topic for t in linked_threads]}")
+            except Exception as e:
+                logger.warning(f"Failed to link message to thought threads: {e}")
         
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
     
