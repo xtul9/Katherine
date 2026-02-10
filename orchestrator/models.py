@@ -26,6 +26,10 @@ class Message(BaseModel):
     # This is Katherine's private reflection on why she said what she said
     internal_monologue: Optional[str] = None
     
+    # Personal heuristics extracted from internal monologue (optional)
+    # This is Katherine's emotional state that she wants the user to know about
+    personal_heuristics: Optional[str] = None
+    
     # IDs of memories that were retrieved and influenced this response
     retrieved_memory_ids: list[str] = Field(default_factory=list)
     

@@ -154,6 +154,11 @@ class ConversationStore:
                 conn.execute("ALTER TABLE messages ADD COLUMN retrieved_memory_ids TEXT")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+            
+            try:
+                conn.execute("ALTER TABLE messages ADD COLUMN personal_heuristics TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         
         logger.info(f"Conversation store initialized: {self.db_path}")
     
@@ -335,8 +340,8 @@ class ConversationStore:
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO messages (id, conversation_id, role, content, timestamp, internal_monologue, retrieved_memory_ids)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (id, conversation_id, role, content, timestamp, internal_monologue, retrieved_memory_ids, personal_heuristics)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.id,
@@ -345,7 +350,8 @@ class ConversationStore:
                     message.content,
                     message.timestamp.isoformat() if isinstance(message.timestamp, datetime) else message.timestamp,
                     encrypted_monologue,
-                    memory_ids_str
+                    memory_ids_str,
+                    message.personal_heuristics
                 )
             )
             
@@ -418,13 +424,17 @@ class ConversationStore:
             memory_ids_str = row["retrieved_memory_ids"] if "retrieved_memory_ids" in row.keys() else None
             retrieved_memory_ids = memory_ids_str.split(",") if memory_ids_str else []
             
+            # Get personal heuristics
+            personal_heuristics = row["personal_heuristics"] if "personal_heuristics" in row.keys() else None
+            
             messages.append(Message(
                 id=row["id"],
                 role=MessageRole(row["role"]),
                 content=row["content"],
                 timestamp=_parse_datetime(row["timestamp"]),
                 internal_monologue=internal_monologue,
-                retrieved_memory_ids=retrieved_memory_ids
+                retrieved_memory_ids=retrieved_memory_ids,
+                personal_heuristics=personal_heuristics
             ))
         
         return messages
@@ -499,13 +509,17 @@ class ConversationStore:
         memory_ids_str = row["retrieved_memory_ids"] if "retrieved_memory_ids" in row.keys() else None
         retrieved_memory_ids = memory_ids_str.split(",") if memory_ids_str else []
         
+        # Get personal heuristics
+        personal_heuristics = row["personal_heuristics"] if "personal_heuristics" in row.keys() else None
+        
         return Message(
             id=row["id"],
             role=MessageRole(row["role"]),
             content=row["content"],
             timestamp=_parse_datetime(row["timestamp"]),
             internal_monologue=internal_monologue,
-            retrieved_memory_ids=retrieved_memory_ids
+            retrieved_memory_ids=retrieved_memory_ids,
+            personal_heuristics=personal_heuristics
         )
     
     # =========================================================================

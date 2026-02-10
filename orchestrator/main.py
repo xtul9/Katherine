@@ -734,7 +734,8 @@ async def chat(request: ChatRequest):
     
     # Generate response
     try:
-        raw_response = await llm_client.chat_completion(messages)
+        # Użyj reasoning effort "high" dla faktycznej odpowiedzi
+        raw_response = await llm_client.chat_completion(messages, reasoning_effort="high")
     except Exception as e:
         logger.error(f"LLM error: {e}")
         raise HTTPException(status_code=503, detail=f"LLM service error: {str(e)}")
@@ -754,6 +755,14 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.warning(f"Failed to parse/apply tag changes: {e}")
     
+    # Parse personal heuristics from internal monologue
+    personal_heuristics = None
+    try:
+        from llm_client import parse_personal_heuristics_from_monologue
+        personal_heuristics = parse_personal_heuristics_from_monologue(internal_monologue)
+    except Exception as e:
+        logger.warning(f"Failed to parse personal heuristics: {e}")
+    
     # Record self-development assessment from internal monologue
     self_dev_tracker.record_assessment(
         internal_monologue=internal_monologue,
@@ -769,7 +778,7 @@ async def chat(request: ChatRequest):
         user_msg = Message(role=MessageRole.USER, content=request.message, timestamp=user_message_time)
         conversation_store.add_message(conversation_id, user_msg)
     
-    assistant_msg = Message(role=MessageRole.ASSISTANT, content=public_response)
+    assistant_msg = Message(role=MessageRole.ASSISTANT, content=public_response, personal_heuristics=personal_heuristics)
     conversation_store.add_message(
         conversation_id, 
         assistant_msg,
@@ -1111,7 +1120,8 @@ async def chat_stream(request: ChatRequest):
         
         try:
             # Use the new filtered streaming that hides internal monologue
-            async for event in llm_client.stream_with_monologue_filter(messages):
+            # Użyj reasoning effort "high" dla faktycznej odpowiedzi
+            async for event in llm_client.stream_with_monologue_filter(messages, reasoning_effort="high"):
                 if event["type"] == "content":
                     # Stream public content to user
                     yield f"data: {json.dumps(event)}\n\n"
@@ -1142,6 +1152,14 @@ async def chat_stream(request: ChatRequest):
         except Exception as e:
             logger.warning(f"Failed to parse/apply tag changes: {e}")
         
+        # Parse personal heuristics from internal monologue
+        personal_heuristics = None
+        try:
+            from llm_client import parse_personal_heuristics_from_monologue
+            personal_heuristics = parse_personal_heuristics_from_monologue(internal_monologue)
+        except Exception as e:
+            logger.warning(f"Failed to parse personal heuristics: {e}")
+        
         # Record self-development assessment from internal monologue
         self_dev_tracker.record_assessment(
             internal_monologue=internal_monologue,
@@ -1157,7 +1175,7 @@ async def chat_stream(request: ChatRequest):
             user_msg = Message(role=MessageRole.USER, content=request.message, timestamp=user_message_time)
             conversation_store.add_message(conversation_id, user_msg)
         
-        assistant_msg = Message(role=MessageRole.ASSISTANT, content=public_response)
+        assistant_msg = Message(role=MessageRole.ASSISTANT, content=public_response, personal_heuristics=personal_heuristics)
         conversation_store.add_message(
             conversation_id, 
             assistant_msg,
@@ -1179,7 +1197,11 @@ async def chat_stream(request: ChatRequest):
             except Exception as e:
                 logger.warning(f"Failed to link message to thought threads: {e}")
         
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        # Send done event with personal heuristics if available
+        done_event = {'type': 'done'}
+        if personal_heuristics:
+            done_event['personal_heuristics'] = personal_heuristics
+        yield f"data: {json.dumps(done_event)}\n\n"
     
     return StreamingResponse(
         generate(),

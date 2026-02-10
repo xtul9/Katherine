@@ -206,6 +206,16 @@ const MessageBubble = memo(function MessageBubble({ message, isStreaming, onEdit
                 )}
               </div>
             )}
+            {!isUser && message.personal_heuristics && (
+              <div className="mt-3 pt-3 border-t border-void-700/30">
+                <div className="text-xs text-void-400 mb-1.5 font-medium">
+                  Personal heuristics:
+                </div>
+                <p className="text-sm text-void-300 leading-relaxed italic">
+                  {message.personal_heuristics}
+                </p>
+              </div>
+            )}
             <div
               className={clsx(
                 'text-xs mt-2 opacity-50',
@@ -1170,6 +1180,7 @@ export default function App() {
               role: 'assistant',
               content: fullContent,
               timestamp: new Date().toISOString(),
+              personal_heuristics: event.personal_heuristics,
             }
             addMessage(assistantMessage)
           }

@@ -7,6 +7,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system'
   content: string
   timestamp: string
+  personal_heuristics?: string
 }
 
 export interface Memory {
@@ -73,6 +74,7 @@ export interface StreamEvent {
   conversation_id?: string
   memories?: StreamMemory[]  // Full memory data from streaming
   error?: string
+  personal_heuristics?: string  // Personal heuristics extracted from internal monologue
 }
 
 export interface ContextWindowStats {
